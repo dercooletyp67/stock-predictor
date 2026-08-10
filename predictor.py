@@ -1,0 +1,242 @@
+"""
+Polls real-time-ish stock data and posts long/short signals to a Discord webhook.
+
+Signal is based on simple technical indicators (EMA crossover + RSI) — it is a
+decision aid, not a guarantee. No tool can reliably predict short-term price moves.
+"""
+import argparse
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import requests
+import yfinance as yf
+
+CONFIG_PATH = Path(__file__).parent / "config.json"
+STATE_PATH = Path(__file__).parent / "state.json"
+
+
+def load_config():
+    with open(CONFIG_PATH, "r") as f:
+        return json.load(f)
+
+
+def get_webhook_url(cfg: dict) -> str:
+    return os.environ.get("DISCORD_WEBHOOK_URL") or cfg.get("discord_webhook_url", "")
+
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        with open(STATE_PATH, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_state(state: dict):
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f)
+
+
+def compute_rsi(close: pd.Series, period: int) -> float:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
+
+
+def compute_macd(close: pd.Series, fast: int, slow: int, signal: int):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return float(macd_line.iloc[-1]), float(signal_line.iloc[-1])
+
+
+def get_signal(ticker: str, cfg: dict):
+    min_bars = max(cfg["long_ema_period"], cfg["macd_slow"], cfg["volume_period"]) + 1
+    data = yf.download(
+        ticker,
+        period="5d",
+        interval="15m",
+        progress=False,
+        auto_adjust=True,
+    )
+    if data.empty or len(data) < min_bars:
+        return None
+
+    close = data["Close"]
+    volume = data["Volume"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    if isinstance(volume, pd.DataFrame):
+        volume = volume.iloc[:, 0]
+
+    short_ema = close.ewm(span=cfg["short_ema_period"], adjust=False).mean()
+    long_ema = close.ewm(span=cfg["long_ema_period"], adjust=False).mean()
+    rsi = compute_rsi(close, cfg["rsi_period"])
+    macd_line, macd_signal_line = compute_macd(
+        close, cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"]
+    )
+
+    avg_volume = float(volume.rolling(cfg["volume_period"]).mean().iloc[-1])
+    current_volume = float(volume.iloc[-1])
+    volume_confirmed = current_volume > avg_volume * cfg["volume_multiplier"]
+
+    trend = float(short_ema.iloc[-1] - long_ema.iloc[-1])
+    price = float(close.iloc[-1])
+
+    trend_up = trend > 0
+    trend_down = trend < 0
+    macd_bullish = macd_line > macd_signal_line
+    macd_bearish = macd_line < macd_signal_line
+
+    if trend_up and macd_bullish and volume_confirmed and rsi < cfg["rsi_overbought"]:
+        signal = "LONG"
+    elif trend_down and macd_bearish and volume_confirmed and rsi > cfg["rsi_oversold"]:
+        signal = "SHORT"
+    else:
+        signal = "NEUTRAL"
+
+    result = {
+        "ticker": ticker,
+        "price": price,
+        "signal": signal,
+        "rsi": rsi,
+        "short_ema": float(short_ema.iloc[-1]),
+        "long_ema": float(long_ema.iloc[-1]),
+        "macd_line": macd_line,
+        "macd_signal_line": macd_signal_line,
+        "volume_confirmed": volume_confirmed,
+    }
+
+    if signal != "NEUTRAL":
+        result.update(compute_confidence_and_sizing(close, volume, avg_volume, current_volume, macd_line, macd_signal_line, rsi, price, signal, cfg))
+
+    return result
+
+
+def compute_confidence_and_sizing(close, volume, avg_volume, current_volume, macd_line, macd_signal_line, rsi, price, signal, cfg):
+    # 0-1 strength score from three independent confirmations
+    macd_gap_pct = abs(macd_line - macd_signal_line) / price * 100
+    macd_strength = min(macd_gap_pct / 0.5, 1.0)  # 0.5% MACD/price gap treated as "strong"
+
+    rsi_strength = min(abs(rsi - 50) / 30, 1.0)  # 30pts from midline treated as "strong"
+
+    volume_ratio = current_volume / avg_volume if avg_volume else 1.0
+    volume_strength = min((volume_ratio - cfg["volume_multiplier"]) / cfg["volume_multiplier"], 1.0)
+    volume_strength = max(volume_strength, 0.0)
+
+    confidence = (macd_strength + rsi_strength + volume_strength) / 3
+
+    risk_pct = cfg["min_risk_pct"] + confidence * (cfg["max_risk_pct"] - cfg["min_risk_pct"])
+    suggested_amount = cfg["bankroll"] * risk_pct
+
+    returns = close.pct_change().dropna()
+    bar_volatility = float(returns.tail(cfg["volume_period"]).std())
+    projected_move_pct = bar_volatility * (cfg["horizon_bars"] ** 0.5) * 100
+    direction = 1 if signal == "LONG" else -1
+    target_price = price * (1 + direction * projected_move_pct / 100)
+
+    return {
+        "confidence": confidence,
+        "suggested_amount": suggested_amount,
+        "risk_pct": risk_pct,
+        "projected_move_pct": projected_move_pct,
+        "target_price": target_price,
+        "bankroll": cfg["bankroll"],
+    }
+
+
+def post_to_discord(webhook_url: str, info: dict):
+    color = {"LONG": 3066993, "SHORT": 15158332, "NEUTRAL": 9807270}[info["signal"]]
+    action_line = f"**{info['signal']} {info['ticker']}**"
+    if info["signal"] != "NEUTRAL":
+        action_line += f" — invest **${info['suggested_amount']:,.0f}** (confidence {info['confidence']*100:.0f}%)"
+
+    embed = {
+        "title": action_line,
+        "color": color,
+        "fields": [
+            {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
+            {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
+            {"name": "EMA9 / EMA21", "value": f"{info['short_ema']:.2f} / {info['long_ema']:.2f}", "inline": True},
+            {"name": "MACD / Signal", "value": f"{info['macd_line']:.3f} / {info['macd_signal_line']:.3f}", "inline": True},
+            {"name": "Volume confirmed", "value": "Yes" if info["volume_confirmed"] else "No", "inline": True},
+        ],
+        "footer": {"text": "Multi-indicator signal (EMA+MACD+volume). Not a guarantee. Not financial advice."},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if info["signal"] != "NEUTRAL":
+        embed["fields"].insert(0, {
+            "name": "Predicted target (next ~1hr)",
+            "value": f"${info['target_price']:.2f}  ({'+' if info['signal']=='LONG' else '-'}{info['projected_move_pct']:.2f}%)",
+            "inline": False,
+        })
+        embed["fields"].insert(1, {
+            "name": "Suggested amount",
+            "value": f"${info['suggested_amount']:,.0f} of ${info['bankroll']:,.0f} bankroll ({info['risk_pct']*100:.1f}% risk)",
+            "inline": False,
+        })
+
+    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+    resp.raise_for_status()
+
+
+def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
+    for ticker in cfg["tickers"]:
+        try:
+            info = get_signal(ticker, cfg)
+            if info is None:
+                print(f"[{ticker}] not enough data yet, skipping")
+                continue
+
+            changed = last_signal.get(ticker) != info["signal"]
+            if info["signal"] != "NEUTRAL" and (changed or not cfg.get("only_notify_on_change", True)):
+                post_to_discord(webhook_url, info)
+                print(f"[{ticker}] posted signal: {info['signal']} @ ${info['price']:.2f}")
+            else:
+                print(f"[{ticker}] {info['signal']} @ ${info['price']:.2f} (no notify)")
+
+            last_signal[ticker] = info["signal"]
+        except Exception as e:
+            print(f"[{ticker}] error: {e}")
+
+    return last_signal
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single pass and exit, persisting state to state.json (used by scheduled runners like GitHub Actions).",
+    )
+    args = parser.parse_args()
+
+    cfg = load_config()
+    webhook_url = get_webhook_url(cfg)
+    if not webhook_url:
+        raise SystemExit("No Discord webhook URL configured (set discord_webhook_url in config.json or DISCORD_WEBHOOK_URL env var).")
+
+    if args.once:
+        last_signal = load_state()
+        last_signal = run_pass(cfg, webhook_url, last_signal)
+        save_state(last_signal)
+    else:
+        last_signal = {}
+        print("Starting predictor loop. Ctrl+C to stop.")
+        while True:
+            last_signal = run_pass(cfg, webhook_url, last_signal)
+            time.sleep(cfg["poll_interval_seconds"])
+
+
+if __name__ == "__main__":
+    main()
