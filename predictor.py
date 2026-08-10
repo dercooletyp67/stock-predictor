@@ -190,6 +190,23 @@ def post_to_discord(webhook_url: str, info: dict):
     resp.raise_for_status()
 
 
+def post_exit_to_discord(webhook_url: str, ticker: str, closing_position: str, info: dict):
+    reason = "signal reversed" if info["signal"] != "NEUTRAL" else "signal faded to neutral"
+    embed = {
+        "title": f"**SELL / CLOSE {closing_position} {ticker}**",
+        "color": 15844367,  # amber
+        "description": f"Exit your {closing_position} position — {reason}.",
+        "fields": [
+            {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
+            {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
+        ],
+        "footer": {"text": "Exit signal from the same indicator logic. Not a guarantee. Not financial advice."},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+    resp.raise_for_status()
+
+
 def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
     for ticker in cfg["tickers"]:
         try:
@@ -198,14 +215,22 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
                 print(f"[{ticker}] not enough data yet, skipping")
                 continue
 
-            changed = last_signal.get(ticker) != info["signal"]
-            if info["signal"] != "NEUTRAL" and (changed or not cfg.get("only_notify_on_change", True)):
-                post_to_discord(webhook_url, info)
-                print(f"[{ticker}] posted signal: {info['signal']} @ ${info['price']:.2f}")
-            else:
-                print(f"[{ticker}] {info['signal']} @ ${info['price']:.2f} (no notify)")
+            previous = last_signal.get(ticker)
+            previous_position = previous if previous in ("LONG", "SHORT") else None
+            new_signal = info["signal"]
+            notify_enabled = not cfg.get("only_notify_on_change", True) or new_signal != previous
 
-            last_signal[ticker] = info["signal"]
+            if previous_position and new_signal != previous_position:
+                post_exit_to_discord(webhook_url, ticker, previous_position, info)
+                print(f"[{ticker}] posted EXIT for {previous_position} @ ${info['price']:.2f}")
+
+            if new_signal != "NEUTRAL" and notify_enabled:
+                post_to_discord(webhook_url, info)
+                print(f"[{ticker}] posted signal: {new_signal} @ ${info['price']:.2f}")
+            elif not (previous_position and new_signal != previous_position):
+                print(f"[{ticker}] {new_signal} @ ${info['price']:.2f} (no notify)")
+
+            last_signal[ticker] = new_signal
         except Exception as e:
             print(f"[{ticker}] error: {e}")
 
