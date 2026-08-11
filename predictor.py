@@ -161,6 +161,7 @@ def compute_confidence_and_sizing(close, volume, avg_volume_series, macd_line_se
 
     risk_pct = cfg["min_risk_pct"] + confidence * (cfg["max_risk_pct"] - cfg["min_risk_pct"])
     suggested_amount = cfg["bankroll"] * risk_pct
+    suggested_shares = max(1, round(suggested_amount / price))
 
     returns = close.pct_change().dropna()
     bar_volatility = float(returns.tail(cfg["volume_period"]).std())
@@ -171,6 +172,7 @@ def compute_confidence_and_sizing(close, volume, avg_volume_series, macd_line_se
     return {
         "confidence": confidence,
         "suggested_amount": suggested_amount,
+        "suggested_shares": suggested_shares,
         "risk_pct": risk_pct,
         "projected_move_pct": projected_move_pct,
         "target_price": target_price,
@@ -182,7 +184,7 @@ def post_to_discord(webhook_url: str, info: dict):
     color = {"LONG": 3066993, "SHORT": 15158332, "NEUTRAL": 9807270}[info["signal"]]
     action_line = f"**{info['signal']} {info['ticker']}**"
     if info["signal"] != "NEUTRAL":
-        action_line += f" — invest **${info['suggested_amount']:,.0f}** (confidence {info['confidence']*100:.0f}%)"
+        action_line += f" — **{info['suggested_shares']} shares** at 1x (confidence {info['confidence']*100:.0f}%)"
 
     embed = {
         "title": action_line,
@@ -206,7 +208,7 @@ def post_to_discord(webhook_url: str, info: dict):
         })
         embed["fields"].insert(1, {
             "name": "Suggested amount",
-            "value": f"${info['suggested_amount']:,.0f} of ${info['bankroll']:,.0f} bankroll ({info['risk_pct']*100:.1f}% risk)",
+            "value": f"{info['suggested_shares']} shares (~${info['suggested_amount']:,.0f}) of ${info['bankroll']:,.0f} bankroll ({info['risk_pct']*100:.1f}% risk) — leverage: 1x",
             "inline": False,
         })
 
