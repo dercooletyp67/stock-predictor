@@ -12,7 +12,6 @@
   "macd_signal": 9,
   "volume_period": 20,
   "volume_multiplier": 1.2,
-  "only_notify_on_change": true,
   "bankroll": 50000,
   "min_risk_pct": 0.02,
   "max_risk_pct": 0.10,

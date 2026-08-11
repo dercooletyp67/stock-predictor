@@ -206,17 +206,62 @@ def post_to_discord(webhook_url: str, info: dict):
     resp.raise_for_status()
 
 
-def post_exit_to_discord(webhook_url: str, ticker: str, closing_position: str, info: dict):
+def compute_pnl_pct(entry_price, current_price, position):
+    if not entry_price:
+        return None
+    direction = 1 if position == "LONG" else -1
+    return direction * (current_price - entry_price) / entry_price * 100
+
+
+def post_exit_to_discord(webhook_url: str, ticker: str, closing_position: str, info: dict, entry_price):
     reason = "signal reversed" if info["signal"] != "NEUTRAL" else "signal faded to neutral"
+    pnl_pct = compute_pnl_pct(entry_price, info["price"], closing_position)
+
+    fields = [
+        {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
+        {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
+    ]
+    if entry_price:
+        fields.insert(0, {
+            "name": "Entry → Exit",
+            "value": f"${entry_price:.2f} → ${info['price']:.2f}  ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)",
+            "inline": False,
+        })
+
     embed = {
         "title": f"**SELL / CLOSE {closing_position} {ticker}**",
         "color": 15844367,  # amber
         "description": f"Exit your {closing_position} position — {reason}.",
-        "fields": [
-            {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
-            {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
-        ],
+        "fields": fields,
         "footer": {"text": "Exit signal from the same indicator logic. Not a guarantee. Not financial advice."},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+    resp.raise_for_status()
+
+
+def post_hold_to_discord(webhook_url: str, ticker: str, position: str, info: dict, entry_price):
+    pnl_pct = compute_pnl_pct(entry_price, info["price"], position)
+    color = 3066993 if position == "LONG" else 15158332
+
+    fields = [
+        {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
+        {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
+        {"name": "Confidence", "value": f"{info.get('confidence', 0) * 100:.0f}%", "inline": True},
+    ]
+    if entry_price:
+        fields.insert(0, {
+            "name": "Entry → Now",
+            "value": f"${entry_price:.2f} → ${info['price']:.2f}  ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)",
+            "inline": False,
+        })
+
+    embed = {
+        "title": f"**HOLD {position} {ticker}**",
+        "color": color,
+        "description": f"Signal still confirms {position} — stay in your position.",
+        "fields": fields,
+        "footer": {"text": "Status update, not a new trade. Not a guarantee. Not financial advice."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
@@ -240,6 +285,19 @@ def post_heartbeat_to_discord(webhook_url: str, current_signals: dict, errors: d
     resp.raise_for_status()
 
 
+def get_position(state: dict, ticker: str):
+    v = state.get(ticker)
+    if isinstance(v, dict):
+        return v.get("signal", "NEUTRAL"), v.get("entry_price")
+    if isinstance(v, str):
+        return v, None  # legacy state format, no entry price recorded
+    return "NEUTRAL", None
+
+
+def set_position(state: dict, ticker: str, signal: str, entry_price):
+    state[ticker] = {"signal": signal, "entry_price": entry_price if signal != "NEUTRAL" else None}
+
+
 def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
     current_signals = {}
     errors = {}
@@ -251,27 +309,33 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
                 print(f"[{ticker}] not enough data yet, skipping")
                 continue
 
-            previous = last_signal.get(ticker)
-            previous_position = previous if previous in ("LONG", "SHORT") else None
+            previous_signal, entry_price = get_position(last_signal, ticker)
+            previous_position = previous_signal if previous_signal in ("LONG", "SHORT") else None
             new_signal = info["signal"]
-            notify_enabled = not cfg.get("only_notify_on_change", True) or new_signal != previous
 
             if previous_position and new_signal != previous_position:
-                post_exit_to_discord(webhook_url, ticker, previous_position, info)
+                post_exit_to_discord(webhook_url, ticker, previous_position, info, entry_price)
                 print(f"[{ticker}] posted EXIT for {previous_position} @ ${info['price']:.2f}")
+                entry_price = None
 
-            if new_signal != "NEUTRAL" and notify_enabled:
-                post_to_discord(webhook_url, info)
-                print(f"[{ticker}] posted signal: {new_signal} @ ${info['price']:.2f}")
-            elif not (previous_position and new_signal != previous_position):
-                print(f"[{ticker}] {new_signal} @ ${info['price']:.2f} (no notify)")
+            if new_signal != "NEUTRAL":
+                if new_signal != previous_position:
+                    entry_price = info["price"]
+                    post_to_discord(webhook_url, info)
+                    print(f"[{ticker}] posted ENTRY: {new_signal} @ ${info['price']:.2f}")
+                else:
+                    post_hold_to_discord(webhook_url, ticker, new_signal, info, entry_price)
+                    print(f"[{ticker}] posted HOLD: {new_signal} @ ${info['price']:.2f}")
+            else:
+                print(f"[{ticker}] NEUTRAL @ ${info['price']:.2f} (no notify)")
 
-            last_signal[ticker] = new_signal
+            set_position(last_signal, ticker, new_signal, entry_price)
             current_signals[ticker] = new_signal
         except Exception as e:
             print(f"[{ticker}] error: {e}")
             errors[ticker] = str(e)
-            current_signals[ticker] = last_signal.get(ticker, "UNKNOWN")
+            prev_signal, _ = get_position(last_signal, ticker)
+            current_signals[ticker] = prev_signal
 
     heartbeat_interval = cfg.get("heartbeat_interval_seconds", 3600)
     last_heartbeat_str = last_signal.get("_last_heartbeat")
