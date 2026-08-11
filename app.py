@@ -54,7 +54,11 @@ def run_check():
         state = run_pass(cfg, webhook_url, state, heartbeat_webhook_url)
         save_state(state)
 
-    return jsonify({"status": "ok", "signals": {k: v for k, v in state.items() if not k.startswith("_")}})
+    return jsonify({
+        "status": "ok",
+        "scanner_signals": state.get("_scanner_signals", {}),
+        "positions": state.get("positions", {}),
+    })
 
 
 def verify_discord_signature(req) -> bool:
@@ -129,7 +133,7 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
     with STATE_LOCK:
         state = load_state()
 
-    open_tickers = [t for t in state if not t.startswith("_") and get_position(state, t)[0] in ("LONG", "SHORT")]
+    open_tickers = list(state.get("positions", {}).keys())
     if not open_tickers:
         discord_followup(application_id, interaction_token, "No open positions tracked right now.")
         return

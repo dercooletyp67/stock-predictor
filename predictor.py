@@ -180,42 +180,6 @@ def compute_confidence_and_sizing(close, volume, avg_volume_series, macd_line_se
     }
 
 
-def post_to_discord(webhook_url: str, info: dict):
-    color = {"LONG": 3066993, "SHORT": 15158332, "NEUTRAL": 9807270}[info["signal"]]
-    action_line = f"**{info['signal']} {info['ticker']}**"
-    if info["signal"] != "NEUTRAL":
-        action_line += f" — **{info['suggested_shares']} shares** at 1x (confidence {info['confidence']*100:.0f}%)"
-
-    embed = {
-        "title": action_line,
-        "color": color,
-        "fields": [
-            {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
-            {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
-            {"name": "EMA9 / EMA21", "value": f"{info['short_ema']:.2f} / {info['long_ema']:.2f}", "inline": True},
-            {"name": "MACD / Signal", "value": f"{info['macd_line']:.3f} / {info['macd_signal_line']:.3f}", "inline": True},
-            {"name": "Volume confirmed", "value": "Yes" if info["volume_confirmed"] else "No", "inline": True},
-        ],
-        "footer": {"text": "Multi-indicator signal (EMA+MACD+volume). Not a guarantee. Not financial advice."},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-    if info["signal"] != "NEUTRAL":
-        embed["fields"].insert(0, {
-            "name": "Predicted target (next ~1hr)",
-            "value": f"${info['target_price']:.2f}  ({'+' if info['signal']=='LONG' else '-'}{info['projected_move_pct']:.2f}%)",
-            "inline": False,
-        })
-        embed["fields"].insert(1, {
-            "name": "Suggested amount",
-            "value": f"{info['suggested_shares']} shares (~${info['suggested_amount']:,.0f}) of ${info['bankroll']:,.0f} bankroll ({info['risk_pct']*100:.1f}% risk) — leverage: 1x",
-            "inline": False,
-        })
-
-    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
-    resp.raise_for_status()
-
-
 def compute_pnl_pct(entry_price, current_price, position):
     if not entry_price:
         return None
@@ -223,55 +187,35 @@ def compute_pnl_pct(entry_price, current_price, position):
     return direction * (current_price - entry_price) / entry_price * 100
 
 
-def post_exit_to_discord(webhook_url: str, ticker: str, closing_position: str, info: dict, entry_price):
-    reason = "signal reversed" if info["signal"] != "NEUTRAL" else "signal faded to neutral"
-    pnl_pct = compute_pnl_pct(entry_price, info["price"], closing_position)
-
-    fields = [
-        {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
-        {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
-    ]
-    if entry_price:
-        fields.insert(0, {
-            "name": "Entry → Exit",
-            "value": f"${entry_price:.2f} → ${info['price']:.2f}  ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)",
-            "inline": False,
-        })
+def post_digest_to_discord(webhook_url: str, new_signals: list):
+    """One consolidated message listing every ticker that newly crossed into LONG/SHORT this check."""
+    lines = []
+    for info in new_signals:
+        arrow = "🟢" if info["signal"] == "LONG" else "🔴"
+        lines.append(
+            f"{arrow} **{info['signal']} {info['ticker']}** @ ${info['price']:.2f} — "
+            f"{info['suggested_shares']} shares (conf {info['confidence']*100:.0f}%), "
+            f"target ${info['target_price']:.2f}"
+        )
 
     embed = {
-        "title": f"**SELL / CLOSE {closing_position} {ticker}**",
-        "color": 15844367,  # amber
-        "description": f"Exit your {closing_position} position — {reason}.",
-        "fields": fields,
-        "footer": {"text": "Exit signal from the same indicator logic. Not a guarantee. Not financial advice."},
+        "title": f"New signals ({len(new_signals)})",
+        "color": 3447003,
+        "description": "\n".join(lines),
+        "footer": {"text": "Use /invest to start tracking any of these. Not a guarantee. Not financial advice."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
     resp.raise_for_status()
 
 
-def post_hold_to_discord(webhook_url: str, ticker: str, position: str, info: dict, entry_price):
-    pnl_pct = compute_pnl_pct(entry_price, info["price"], position)
-    color = 3066993 if position == "LONG" else 15158332
-
-    fields = [
-        {"name": "Current price", "value": f"${info['price']:.2f}", "inline": True},
-        {"name": "RSI", "value": f"{info['rsi']:.1f}", "inline": True},
-        {"name": "Confidence", "value": f"{info.get('confidence', 0) * 100:.0f}%", "inline": True},
-    ]
-    if entry_price:
-        fields.insert(0, {
-            "name": "Entry → Now",
-            "value": f"${entry_price:.2f} → ${info['price']:.2f}  ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)",
-            "inline": False,
-        })
-
+def post_portfolio_to_discord(webhook_url: str, lines: list):
+    """One consolidated message covering every position you declared via /invest."""
     embed = {
-        "title": f"**HOLD {position} {ticker}**",
-        "color": color,
-        "description": f"Signal still confirms {position} — stay in your position.",
-        "fields": fields,
-        "footer": {"text": "Status update, not a new trade. Not a guarantee. Not financial advice."},
+        "title": "Your positions",
+        "color": 10181046,  # purple
+        "description": "\n".join(lines),
+        "footer": {"text": "Status update for your declared positions. Not a guarantee. Not financial advice."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
@@ -296,63 +240,97 @@ def post_heartbeat_to_discord(webhook_url: str, current_signals: dict, errors: d
 
 
 def get_position(state: dict, ticker: str):
-    v = state.get(ticker)
-    if isinstance(v, dict):
-        return v.get("signal", "NEUTRAL"), v.get("entry_price")
-    if isinstance(v, str):
-        return v, None  # legacy state format, no entry price recorded
+    """Positions ONLY exist here if the user explicitly declared them via /invest."""
+    pos = state.get("positions", {}).get(ticker)
+    if pos:
+        return pos.get("signal", "NEUTRAL"), pos.get("entry_price")
     return "NEUTRAL", None
 
 
 def set_position(state: dict, ticker: str, signal: str, entry_price):
-    state[ticker] = {"signal": signal, "entry_price": entry_price if signal != "NEUTRAL" else None}
+    positions = state.setdefault("positions", {})
+    if signal in ("LONG", "SHORT"):
+        positions[ticker] = {"signal": signal, "entry_price": entry_price}
+    else:
+        positions.pop(ticker, None)
+
+
+def get_scanner_signal(state: dict, ticker: str) -> str:
+    """Last signal the automatic scanner observed for this ticker, independent of any declared position."""
+    return state.get("_scanner_signals", {}).get(ticker, "NEUTRAL")
+
+
+def set_scanner_signal(state: dict, ticker: str, signal: str):
+    state.setdefault("_scanner_signals", {})[ticker] = signal
 
 
 def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_url: str = None) -> dict:
     heartbeat_webhook_url = heartbeat_webhook_url or webhook_url
     current_signals = {}
     errors = {}
+    new_signals = []
 
-    open_position_tickers = {
-        t for t in last_signal
-        if not t.startswith("_") and get_position(last_signal, t)[0] in ("LONG", "SHORT")
-    }
-    all_tickers = list(dict.fromkeys(list(cfg["tickers"]) + list(open_position_tickers)))
-
-    for ticker in all_tickers:
+    for ticker in cfg["tickers"]:
         try:
             info = get_signal(ticker, cfg)
             if info is None:
                 print(f"[{ticker}] not enough data yet, skipping")
                 continue
 
-            previous_signal, entry_price = get_position(last_signal, ticker)
-            previous_position = previous_signal if previous_signal in ("LONG", "SHORT") else None
             new_signal = info["signal"]
+            previously_seen = get_scanner_signal(last_signal, ticker)
+            if new_signal != "NEUTRAL" and new_signal != previously_seen:
+                new_signals.append(info)
 
-            if previous_position and new_signal != previous_position:
-                post_exit_to_discord(webhook_url, ticker, previous_position, info, entry_price)
-                print(f"[{ticker}] posted EXIT for {previous_position} @ ${info['price']:.2f}")
-                entry_price = None
-
-            if new_signal != "NEUTRAL":
-                if new_signal != previous_position:
-                    entry_price = info["price"]
-                    post_to_discord(webhook_url, info)
-                    print(f"[{ticker}] posted ENTRY: {new_signal} @ ${info['price']:.2f}")
-                else:
-                    post_hold_to_discord(webhook_url, ticker, new_signal, info, entry_price)
-                    print(f"[{ticker}] posted HOLD: {new_signal} @ ${info['price']:.2f}")
-            else:
-                print(f"[{ticker}] NEUTRAL @ ${info['price']:.2f} (no notify)")
-
-            set_position(last_signal, ticker, new_signal, entry_price)
+            set_scanner_signal(last_signal, ticker, new_signal)
             current_signals[ticker] = new_signal
         except Exception as e:
             print(f"[{ticker}] error: {e}")
             errors[ticker] = str(e)
-            prev_signal, _ = get_position(last_signal, ticker)
-            current_signals[ticker] = prev_signal
+            current_signals[ticker] = get_scanner_signal(last_signal, ticker)
+
+    if new_signals:
+        try:
+            post_digest_to_discord(webhook_url, new_signals)
+            print(f"posted digest with {len(new_signals)} new signal(s)")
+        except Exception as e:
+            print(f"digest post error: {e}")
+
+    positions = last_signal.get("positions", {})
+    if positions:
+        lines = []
+        for ticker, pos in positions.items():
+            position, entry_price = pos["signal"], pos["entry_price"]
+            try:
+                info = get_signal(ticker, cfg)
+            except Exception as e:
+                lines.append(f"**{ticker}** ({position}): data error — {e}")
+                continue
+
+            if info is None:
+                lines.append(f"**{ticker}** ({position}): not enough data right now")
+                continue
+
+            price = info["price"]
+            current_signal = info["signal"]
+            pnl_pct = compute_pnl_pct(entry_price, price, position)
+            pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
+
+            if current_signal == position:
+                action = "STAY / HOLD"
+            elif current_signal == "NEUTRAL":
+                action = "SELL — signal faded to neutral"
+            else:
+                action = f"SELL — signal reversed to {current_signal}"
+
+            entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
+            lines.append(f"**{ticker}** ({position} @ {entry_str} → ${price:.2f}{pnl_str}): **{action}**")
+
+        try:
+            post_portfolio_to_discord(webhook_url, lines)
+            print(f"posted portfolio update for {len(positions)} position(s)")
+        except Exception as e:
+            print(f"portfolio post error: {e}")
 
     heartbeat_interval = cfg.get("heartbeat_interval_seconds", 3600)
     last_heartbeat_str = last_signal.get("_last_heartbeat")
