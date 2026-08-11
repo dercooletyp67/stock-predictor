@@ -16,5 +16,6 @@
   "bankroll": 50000,
   "min_risk_pct": 0.02,
   "max_risk_pct": 0.10,
-  "horizon_bars": 4
+  "horizon_bars": 4,
+  "heartbeat_interval_seconds": 3600
 }

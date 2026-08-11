@@ -207,7 +207,27 @@ def post_exit_to_discord(webhook_url: str, ticker: str, closing_position: str, i
     resp.raise_for_status()
 
 
+def post_heartbeat_to_discord(webhook_url: str, current_signals: dict, errors: dict):
+    lines = []
+    for ticker, signal in current_signals.items():
+        marker = " (data error)" if ticker in errors else ""
+        lines.append(f"**{ticker}**: {signal}{marker}")
+
+    embed = {
+        "title": "Predictor heartbeat — still running",
+        "color": 3447003,  # blue
+        "description": "\n".join(lines) if lines else "No ticker data available this check.",
+        "footer": {"text": "Periodic health check. No action needed unless a ticker shows a data error."},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+    resp.raise_for_status()
+
+
 def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
+    current_signals = {}
+    errors = {}
+
     for ticker in cfg["tickers"]:
         try:
             info = get_signal(ticker, cfg)
@@ -231,8 +251,27 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
                 print(f"[{ticker}] {new_signal} @ ${info['price']:.2f} (no notify)")
 
             last_signal[ticker] = new_signal
+            current_signals[ticker] = new_signal
         except Exception as e:
             print(f"[{ticker}] error: {e}")
+            errors[ticker] = str(e)
+            current_signals[ticker] = last_signal.get(ticker, "UNKNOWN")
+
+    heartbeat_interval = cfg.get("heartbeat_interval_seconds", 3600)
+    last_heartbeat_str = last_signal.get("_last_heartbeat")
+    now = datetime.now(timezone.utc)
+    due_for_heartbeat = True
+    if last_heartbeat_str:
+        last_heartbeat = datetime.fromisoformat(last_heartbeat_str)
+        due_for_heartbeat = (now - last_heartbeat).total_seconds() >= heartbeat_interval
+
+    if due_for_heartbeat:
+        try:
+            post_heartbeat_to_discord(webhook_url, current_signals, errors)
+            print("posted heartbeat")
+            last_signal["_last_heartbeat"] = now.isoformat()
+        except Exception as e:
+            print(f"heartbeat post error: {e}")
 
     return last_signal
 
