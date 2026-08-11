@@ -26,6 +26,19 @@ DISCORD_PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY", "")
 DISCORD_API = "https://discord.com/api/v10"
 ALLOWED_USER_ID = "937305776526065675"
 
+HELP_TEXT = (
+    "**Commands**\n"
+    "`/invest ticker:NVDA direction:long` — start tracking a position at the current price. "
+    "`direction` can be `long`, `short`, or `auto` (bot picks based on the live signal, or declines if it's neutral). "
+    "Optional `stop_loss_pct` — SELL alert fires if you're down that much, even without a signal reversal.\n"
+    "`/close ticker:NVDA` — stop tracking a position (you already sold/closed it in-game).\n"
+    "`/status` — private summary of everything you're tracking, with STAY/SELL and live P/L for each.\n"
+    "`/best` — the single highest-confidence LONG/SHORT signal across all tracked tickers right now.\n"
+    "`/help` — this message.\n\n"
+    "You'll also get automatic messages: a digest when new signals appear on tickers you haven't invested in, "
+    "a portfolio update for whatever you're tracking, and an hourly heartbeat confirming the bot is alive."
+)
+
 # Serializes state.json read-modify-write across concurrent requests (Discord interactions
 # and /run-check can overlap on Render's single worker).
 STATE_LOCK = threading.Lock()
@@ -81,7 +94,7 @@ def discord_followup(application_id: str, interaction_token: str, content: str):
     requests.patch(url, json={"content": content}, timeout=10)
 
 
-def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict):
+def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict, stop_loss_pct=None):
     ticker = ticker.upper()
     direction = direction.upper()
     try:
@@ -104,12 +117,13 @@ def handle_invest(application_id: str, interaction_token: str, ticker: str, dire
 
         with STATE_LOCK:
             state = load_state()
-            set_position(state, ticker, direction, info["price"])
+            set_position(state, ticker, direction, info["price"], stop_loss_pct)
             save_state(state)
 
+        stop_loss_note = f" Stop-loss set at -{stop_loss_pct}%." if stop_loss_pct else ""
         discord_followup(
             application_id, interaction_token,
-            f"Tracking **{direction} {ticker}** from entry **${info['price']:.2f}**{note}. "
+            f"Tracking **{direction} {ticker}** from entry **${info['price']:.2f}**{note}.{stop_loss_note} "
             f"You'll get HOLD/SELL updates on every check from now on.",
         )
     except Exception as e:
@@ -120,7 +134,7 @@ def handle_close(application_id: str, interaction_token: str, ticker: str):
     ticker = ticker.upper()
     with STATE_LOCK:
         state = load_state()
-        signal, entry_price = get_position(state, ticker)
+        signal, entry_price, _ = get_position(state, ticker)
         if signal not in ("LONG", "SHORT"):
             discord_followup(application_id, interaction_token, f"No open position tracked for `{ticker}`.")
             return
@@ -140,7 +154,7 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
 
     lines = []
     for ticker in open_tickers:
-        position, entry_price = get_position(state, ticker)
+        position, entry_price, stop_loss_pct = get_position(state, ticker)
         try:
             info = get_signal(ticker, cfg)
         except Exception:
@@ -155,7 +169,13 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
         pnl_pct = compute_pnl_pct(entry_price, price, position)
         pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
 
-        if current_signal == position:
+        stop_loss_hit = (
+            stop_loss_pct is not None and pnl_pct is not None and pnl_pct <= -abs(stop_loss_pct)
+        )
+
+        if stop_loss_hit:
+            action = f"SELL — STOP LOSS HIT ({pnl_pct:.2f}% ≤ -{abs(stop_loss_pct):.1f}%)"
+        elif current_signal == position:
             action = "STAY / HOLD"
         elif current_signal == "NEUTRAL":
             action = "SELL — signal faded to neutral"
@@ -229,10 +249,16 @@ def discord_interactions():
         command_name = body["data"]["name"]
         options = {opt["name"]: opt["value"] for opt in body["data"].get("options", [])}
 
+        if command_name == "help":
+            return jsonify({
+                "type": 4,  # CHANNEL_MESSAGE_WITH_SOURCE — no need to defer, this is static
+                "data": {"content": HELP_TEXT, "flags": 64},
+            })
+
         if command_name == "invest":
             threading.Thread(
                 target=handle_invest,
-                args=(application_id, interaction_token, options["ticker"], options["direction"], cfg),
+                args=(application_id, interaction_token, options["ticker"], options["direction"], cfg, options.get("stop_loss_pct")),
                 daemon=True,
             ).start()
         elif command_name == "close":

@@ -30,6 +30,14 @@ COMMANDS = [
                     {"name": "auto (bot decides)", "value": "AUTO"},
                 ],
             },
+            {
+                "name": "stop_loss_pct",
+                "description": "Optional: alert if you're down this much %, even without a signal reversal",
+                "type": 10,  # NUMBER
+                "required": False,
+                "min_value": 0.1,
+                "max_value": 100,
+            },
         ],
     },
     {
@@ -47,6 +55,11 @@ COMMANDS = [
     {
         "name": "best",
         "description": "Show the single highest-confidence LONG/SHORT opportunity right now",
+        "options": [],
+    },
+    {
+        "name": "help",
+        "description": "List all commands and what they do",
         "options": [],
     },
 ]

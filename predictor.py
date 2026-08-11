@@ -243,14 +243,14 @@ def get_position(state: dict, ticker: str):
     """Positions ONLY exist here if the user explicitly declared them via /invest."""
     pos = state.get("positions", {}).get(ticker)
     if pos:
-        return pos.get("signal", "NEUTRAL"), pos.get("entry_price")
-    return "NEUTRAL", None
+        return pos.get("signal", "NEUTRAL"), pos.get("entry_price"), pos.get("stop_loss_pct")
+    return "NEUTRAL", None, None
 
 
-def set_position(state: dict, ticker: str, signal: str, entry_price):
+def set_position(state: dict, ticker: str, signal: str, entry_price, stop_loss_pct=None):
     positions = state.setdefault("positions", {})
     if signal in ("LONG", "SHORT"):
-        positions[ticker] = {"signal": signal, "entry_price": entry_price}
+        positions[ticker] = {"signal": signal, "entry_price": entry_price, "stop_loss_pct": stop_loss_pct}
     else:
         positions.pop(ticker, None)
 
@@ -301,6 +301,7 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_u
         lines = []
         for ticker, pos in positions.items():
             position, entry_price = pos["signal"], pos["entry_price"]
+            stop_loss_pct = pos.get("stop_loss_pct")
             try:
                 info = get_signal(ticker, cfg)
             except Exception as e:
@@ -316,7 +317,13 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_u
             pnl_pct = compute_pnl_pct(entry_price, price, position)
             pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
 
-            if current_signal == position:
+            stop_loss_hit = (
+                stop_loss_pct is not None and pnl_pct is not None and pnl_pct <= -abs(stop_loss_pct)
+            )
+
+            if stop_loss_hit:
+                action = f"SELL — STOP LOSS HIT ({pnl_pct:.2f}% ≤ -{abs(stop_loss_pct):.1f}%)"
+            elif current_signal == position:
                 action = "STAY / HOLD"
             elif current_signal == "NEUTRAL":
                 action = "SELL — signal faded to neutral"
