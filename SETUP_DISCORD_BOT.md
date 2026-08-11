@@ -36,7 +36,7 @@ DISCORD_APPLICATION_ID=your_application_id DISCORD_BOT_TOKEN=your_bot_token pyth
 
 (On Windows PowerShell: `$env:DISCORD_APPLICATION_ID="..."; $env:DISCORD_BOT_TOKEN="..."; python register_commands.py`)
 
-This registers `/invest`, `/close`, `/status` globally — can take up to an hour to show up
+This registers `/invest`, `/sold`, `/status` globally — can take up to an hour to show up
 everywhere, but usually appears within a few minutes.
 
 ## 5. Invite the bot to your server
@@ -47,7 +47,7 @@ everywhere, but usually appears within a few minutes.
 ## Usage
 - `/invest ticker:NVDA direction:long` — starts tracking a LONG NVDA position at the current price
 - `/invest ticker:MSFT direction:short` — same for a short
-- `/close ticker:NVDA` — stop tracking (you already sold/closed it in-game)
+- `/sold ticker:NVDA` — stop tracking (you already sold/closed it in-game)
 - `/status` — see all currently tracked positions with live P/L
 
 You'll then get the same HOLD/SELL alerts as the automatic scanner, but tied to what you

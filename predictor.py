@@ -277,7 +277,7 @@ def get_bankroll(cfg: dict, state: dict) -> float:
 
 
 def get_effective_config(cfg: dict, state: dict) -> dict:
-    """cfg with the user's current /bankroll amount applied, so sizing suggestions stay accurate."""
+    """cfg with the user's current /money amount applied, so sizing suggestions stay accurate."""
     return {**cfg, "bankroll": get_bankroll(cfg, state)}
 
 

@@ -3,7 +3,7 @@ Small HTTP wrapper around predictor.py so it can run as a Render free Web Servic
 An external pinger (e.g. UptimeRobot) hits /run-check on a schedule to trigger checks,
 since Render's free tier only allows Web Services (not standalone background workers/cron).
 
-Also hosts a Discord Interactions endpoint so /invest, /close, /status slash commands
+Also hosts a Discord Interactions endpoint so /invest, /sold, /status slash commands
 let you register your OWN real in-game position and get HOLD/SELL alerts for it,
 independent of what the automatic scanner would have suggested.
 """
@@ -31,14 +31,14 @@ HELP_TEXT = (
     "`/invest ticker:NVDA direction:long` — start tracking a position at the current price. "
     "`direction` can be `long`, `short`, or `auto` (bot picks based on the live signal, or declines if it's neutral). "
     "Optional `stop_loss_pct` — SELL alert fires if you're down that much. "
-    "Optional `take_profit_pct` — overrides your remembered `/target` for just this trade.\n"
-    "`/close ticker:NVDA` — stop tracking a position (you already sold/closed it in-game).\n"
+    "Optional `take_profit_pct` — overrides your remembered `/goal` for just this trade.\n"
+    "`/sold ticker:NVDA` — stop tracking a position (you already sold/closed it in-game).\n"
     "`/status` — private summary of everything you're tracking, with STAY/SELL and live P/L for each.\n"
     "`/best` — the single highest-confidence LONG/SHORT signal across all tracked tickers right now.\n"
     "`/check ticker:NVDA` — look up any ticker's current signal/indicators, whether or not you've invested.\n"
-    "`/signals` — full board: every tracked ticker's current signal, on demand.\n"
-    "`/bankroll amount:50000` — tell the bot how much money you have, so suggested position sizes stay accurate.\n"
-    "`/target percent:10` — remembered default: SELL alert once a position is up this much %, for all future `/invest` calls.\n"
+    "`/market` — full board: every tracked ticker's current signal, on demand.\n"
+    "`/money amount:50000` — tell the bot how much money you have, so suggested position sizes stay accurate.\n"
+    "`/goal percent:10` — remembered default: SELL alert once a position is up this much %, for all future `/invest` calls.\n"
     "`/help` — this message.\n\n"
     "You'll also get automatic messages: a digest when new signals appear on tickers you haven't invested in, "
     "a portfolio update (pings you when action is needed) for whatever you're tracking, and an hourly heartbeat. "
@@ -143,7 +143,7 @@ def handle_invest(application_id: str, interaction_token: str, ticker: str, dire
         discord_followup(application_id, interaction_token, f"Error registering `{ticker}`: {e}")
 
 
-def handle_close(application_id: str, interaction_token: str, ticker: str):
+def handle_sold(application_id: str, interaction_token: str, ticker: str):
     ticker = ticker.upper()
     with STATE_LOCK:
         state = load_state()
@@ -156,20 +156,20 @@ def handle_close(application_id: str, interaction_token: str, ticker: str):
     discord_followup(application_id, interaction_token, f"Stopped tracking **{signal} {ticker}**.")
 
 
-def handle_bankroll(application_id: str, interaction_token: str, amount: float):
+def handle_money(application_id: str, interaction_token: str, amount: float):
     if amount <= 0:
-        discord_followup(application_id, interaction_token, "Bankroll must be a positive number.")
+        discord_followup(application_id, interaction_token, "Amount must be a positive number.")
         return
     with STATE_LOCK:
         state = load_state()
         state["bankroll"] = amount
         save_state(state)
-    discord_followup(application_id, interaction_token, f"Bankroll set to **${amount:,.0f}**. Position sizing suggestions will now use this.")
+    discord_followup(application_id, interaction_token, f"Money set to **${amount:,.0f}**. Position sizing suggestions will now use this.")
 
 
-def handle_target(application_id: str, interaction_token: str, percent: float):
+def handle_goal(application_id: str, interaction_token: str, percent: float):
     if percent <= 0:
-        discord_followup(application_id, interaction_token, "Target must be a positive number.")
+        discord_followup(application_id, interaction_token, "Goal must be a positive number.")
         return
     with STATE_LOCK:
         state = load_state()
@@ -177,7 +177,7 @@ def handle_target(application_id: str, interaction_token: str, percent: float):
         save_state(state)
     discord_followup(
         application_id, interaction_token,
-        f"Default profit target set to **+{percent}%**. Future `/invest` calls will use this unless you override with `take_profit_pct`. "
+        f"Default profit goal set to **+{percent}%**. Future `/invest` calls will use this unless you override with `take_profit_pct`. "
         f"Existing tracked positions aren't affected retroactively.",
     )
 
@@ -283,7 +283,7 @@ def handle_check(application_id: str, interaction_token: str, ticker: str, cfg: 
     discord_followup(application_id, interaction_token, "\n".join(lines))
 
 
-def handle_signals(application_id: str, interaction_token: str, cfg: dict):
+def handle_market(application_id: str, interaction_token: str, cfg: dict):
     lines = []
     for ticker in cfg["tickers"]:
         try:
@@ -340,9 +340,9 @@ def discord_interactions():
                 args=(application_id, interaction_token, options["ticker"], options["direction"], cfg, options.get("stop_loss_pct"), options.get("take_profit_pct")),
                 daemon=True,
             ).start()
-        elif command_name == "close":
+        elif command_name == "sold":
             threading.Thread(
-                target=handle_close,
+                target=handle_sold,
                 args=(application_id, interaction_token, options["ticker"]),
                 daemon=True,
             ).start()
@@ -364,21 +364,21 @@ def discord_interactions():
                 args=(application_id, interaction_token, options["ticker"], cfg),
                 daemon=True,
             ).start()
-        elif command_name == "bankroll":
+        elif command_name == "money":
             threading.Thread(
-                target=handle_bankroll,
+                target=handle_money,
                 args=(application_id, interaction_token, options["amount"]),
                 daemon=True,
             ).start()
-        elif command_name == "target":
+        elif command_name == "goal":
             threading.Thread(
-                target=handle_target,
+                target=handle_goal,
                 args=(application_id, interaction_token, options["percent"]),
                 daemon=True,
             ).start()
-        elif command_name == "signals":
+        elif command_name == "market":
             threading.Thread(
-                target=handle_signals,
+                target=handle_market,
                 args=(application_id, interaction_token, cfg),
                 daemon=True,
             ).start()

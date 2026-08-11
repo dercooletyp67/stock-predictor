@@ -1,5 +1,5 @@
 """
-One-time script to register the /invest, /close, /status slash commands with Discord.
+One-time script to register the /invest, /sold, /status slash commands with Discord.
 Run locally after creating your Discord Application (see SETUP_DISCORD_BOT.md).
 
 Requires env vars (not committed anywhere):
@@ -40,7 +40,7 @@ COMMANDS = [
             },
             {
                 "name": "take_profit_pct",
-                "description": "Optional: overrides your remembered /target for just this trade",
+                "description": "Optional: overrides your remembered /goal for just this trade",
                 "type": 10,  # NUMBER
                 "required": False,
                 "min_value": 0.1,
@@ -49,7 +49,7 @@ COMMANDS = [
         ],
     },
     {
-        "name": "close",
+        "name": "sold",
         "description": "Stop tracking a position (you already sold/closed it in-game)",
         "options": [
             {"name": "ticker", "description": "Stock ticker, e.g. NVDA", "type": 3, "required": True},
@@ -78,21 +78,21 @@ COMMANDS = [
         "options": [],
     },
     {
-        "name": "bankroll",
+        "name": "money",
         "description": "Tell the bot how much money you currently have, for accurate position sizing",
         "options": [
-            {"name": "amount", "description": "Your current bankroll, e.g. 50000", "type": 10, "required": True, "min_value": 1},
+            {"name": "amount", "description": "Your current money, e.g. 50000", "type": 10, "required": True, "min_value": 1},
         ],
     },
     {
-        "name": "target",
-        "description": "Set your remembered default profit target %, used for future /invest calls",
+        "name": "goal",
+        "description": "Set your remembered default profit goal %, used for future /invest calls",
         "options": [
             {"name": "percent", "description": "e.g. 10 for +10%", "type": 10, "required": True, "min_value": 0.1, "max_value": 1000},
         ],
     },
     {
-        "name": "signals",
+        "name": "market",
         "description": "Full board: every tracked ticker's current signal, on demand",
         "options": [],
     },
