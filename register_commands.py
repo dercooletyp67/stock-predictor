@@ -27,6 +27,7 @@ COMMANDS = [
                 "choices": [
                     {"name": "long", "value": "LONG"},
                     {"name": "short", "value": "SHORT"},
+                    {"name": "auto (bot decides)", "value": "AUTO"},
                 ],
             },
         ],

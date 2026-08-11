@@ -86,6 +86,18 @@ def handle_invest(application_id: str, interaction_token: str, ticker: str, dire
             discord_followup(application_id, interaction_token, f"Couldn't get data for `{ticker}` — check the symbol is right.")
             return
 
+        note = ""
+        if direction == "AUTO":
+            if info["signal"] == "NEUTRAL":
+                discord_followup(
+                    application_id, interaction_token,
+                    f"`{ticker}` has no clear signal right now (NEUTRAL) — the bot won't guess a direction. "
+                    f"Try again once it flips LONG or SHORT, or specify a direction yourself.",
+                )
+                return
+            direction = info["signal"]
+            note = f" (bot chose {direction.lower()} based on the current signal)"
+
         with STATE_LOCK:
             state = load_state()
             set_position(state, ticker, direction, info["price"])
@@ -93,7 +105,7 @@ def handle_invest(application_id: str, interaction_token: str, ticker: str, dire
 
         discord_followup(
             application_id, interaction_token,
-            f"Tracking **{direction} {ticker}** from entry **${info['price']:.2f}**. "
+            f"Tracking **{direction} {ticker}** from entry **${info['price']:.2f}**{note}. "
             f"You'll get HOLD/SELL updates on every check from now on.",
         )
     except Exception as e:
