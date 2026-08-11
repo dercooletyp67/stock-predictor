@@ -10,3 +10,5 @@ services:
         sync: false
       - key: CHECK_SECRET
         sync: false
+      - key: DISCORD_PUBLIC_KEY
+        sync: false

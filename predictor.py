@@ -302,7 +302,13 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
     current_signals = {}
     errors = {}
 
-    for ticker in cfg["tickers"]:
+    open_position_tickers = {
+        t for t in last_signal
+        if not t.startswith("_") and get_position(last_signal, t)[0] in ("LONG", "SHORT")
+    }
+    all_tickers = list(dict.fromkeys(list(cfg["tickers"]) + list(open_position_tickers)))
+
+    for ticker in all_tickers:
         try:
             info = get_signal(ticker, cfg)
             if info is None:
