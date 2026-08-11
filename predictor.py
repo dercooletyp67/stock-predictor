@@ -53,12 +53,20 @@ def compute_rsi(close: pd.Series, period: int) -> float:
     return float(rsi.iloc[-1])
 
 
-def compute_macd(close: pd.Series, fast: int, slow: int, signal: int):
+def compute_macd_series(close: pd.Series, fast: int, slow: int, signal: int):
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return float(macd_line.iloc[-1]), float(signal_line.iloc[-1])
+    return macd_line, signal_line
+
+
+def percentile_rank(series: pd.Series, value: float) -> float:
+    """Where `value` ranks (0-1) against the historical distribution of `series`."""
+    clean = series.dropna()
+    if len(clean) < 2:
+        return 0.5
+    return float((clean < value).sum() / len(clean))
 
 
 def get_signal(ticker: str, cfg: dict):
@@ -83,11 +91,14 @@ def get_signal(ticker: str, cfg: dict):
     short_ema = close.ewm(span=cfg["short_ema_period"], adjust=False).mean()
     long_ema = close.ewm(span=cfg["long_ema_period"], adjust=False).mean()
     rsi = compute_rsi(close, cfg["rsi_period"])
-    macd_line, macd_signal_line = compute_macd(
+    macd_line_series, macd_signal_series = compute_macd_series(
         close, cfg["macd_fast"], cfg["macd_slow"], cfg["macd_signal"]
     )
+    macd_line = float(macd_line_series.iloc[-1])
+    macd_signal_line = float(macd_signal_series.iloc[-1])
 
-    avg_volume = float(volume.rolling(cfg["volume_period"]).mean().iloc[-1])
+    avg_volume_series = volume.rolling(cfg["volume_period"]).mean()
+    avg_volume = float(avg_volume_series.iloc[-1])
     current_volume = float(volume.iloc[-1])
     volume_confirmed = current_volume > avg_volume * cfg["volume_multiplier"]
 
@@ -119,21 +130,24 @@ def get_signal(ticker: str, cfg: dict):
     }
 
     if signal != "NEUTRAL":
-        result.update(compute_confidence_and_sizing(close, volume, avg_volume, current_volume, macd_line, macd_signal_line, rsi, price, signal, cfg))
+        result.update(compute_confidence_and_sizing(
+            close, volume, avg_volume_series,
+            macd_line_series, macd_signal_series, rsi, price, signal, cfg,
+        ))
 
     return result
 
 
-def compute_confidence_and_sizing(close, volume, avg_volume, current_volume, macd_line, macd_signal_line, rsi, price, signal, cfg):
-    # 0-1 strength score from three independent confirmations
-    macd_gap_pct = abs(macd_line - macd_signal_line) / price * 100
-    macd_strength = min(macd_gap_pct / 0.5, 1.0)  # 0.5% MACD/price gap treated as "strong"
+def compute_confidence_and_sizing(close, volume, avg_volume_series, macd_line_series, macd_signal_series, rsi, price, signal, cfg):
+    # Each factor is scored relative to this ticker's OWN recent history (percentile rank),
+    # not a fixed threshold — a "strong" move for KO isn't the same size as one for TSLA.
+    macd_gap_series = (macd_line_series - macd_signal_series).abs() / close * 100
+    macd_strength = percentile_rank(macd_gap_series, macd_gap_series.iloc[-1])
 
-    rsi_strength = min(abs(rsi - 50) / 30, 1.0)  # 30pts from midline treated as "strong"
+    rsi_strength = min(abs(rsi - 50) / 30, 1.0)  # RSI is already a bounded 0-100 scale, comparable across tickers
 
-    volume_ratio = current_volume / avg_volume if avg_volume else 1.0
-    volume_strength = min((volume_ratio - cfg["volume_multiplier"]) / cfg["volume_multiplier"], 1.0)
-    volume_strength = max(volume_strength, 0.0)
+    volume_ratio_series = volume / avg_volume_series
+    volume_strength = percentile_rank(volume_ratio_series, volume_ratio_series.iloc[-1])
 
     confidence = (macd_strength + rsi_strength + volume_strength) / 3
 
