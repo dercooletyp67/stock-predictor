@@ -136,20 +136,30 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
 
     lines = []
     for ticker in open_tickers:
-        signal, entry_price = get_position(state, ticker)
+        position, entry_price = get_position(state, ticker)
         try:
             info = get_signal(ticker, cfg)
-            price = info["price"] if info else None
         except Exception:
-            price = None
+            info = None
 
-        if price is None:
-            lines.append(f"**{ticker}**: {signal} (price unavailable)")
+        if info is None:
+            lines.append(f"**{ticker}**: {position} — price unavailable, can't confirm")
             continue
 
-        pnl_pct = compute_pnl_pct(entry_price, price, signal)
+        price = info["price"]
+        current_signal = info["signal"]
+        pnl_pct = compute_pnl_pct(entry_price, price, position)
         pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
-        lines.append(f"**{ticker}**: {signal} @ ${price:.2f}{pnl_str}")
+
+        if current_signal == position:
+            action = "STAY / HOLD"
+        elif current_signal == "NEUTRAL":
+            action = "SELL — signal faded to neutral"
+        else:
+            action = f"SELL — signal reversed to {current_signal}"
+
+        entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
+        lines.append(f"**{ticker}** ({position} @ {entry_str}, now ${price:.2f}{pnl_str}): **{action}**")
 
     discord_followup(application_id, interaction_token, "\n".join(lines))
 
@@ -197,7 +207,7 @@ def discord_interactions():
                 daemon=True,
             ).start()
 
-        return jsonify({"type": 5})  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+        return jsonify({"type": 5, "data": {"flags": 64}})  # DEFERRED, ephemeral (only you can see it)
 
     return jsonify({"error": "unhandled interaction type"}), 400
 
