@@ -38,6 +38,14 @@ COMMANDS = [
                 "min_value": 0.1,
                 "max_value": 100,
             },
+            {
+                "name": "take_profit_pct",
+                "description": "Optional: overrides your remembered /target for just this trade",
+                "type": 10,  # NUMBER
+                "required": False,
+                "min_value": 0.1,
+                "max_value": 1000,
+            },
         ],
     },
     {
@@ -68,6 +76,20 @@ COMMANDS = [
         "name": "help",
         "description": "List all commands and what they do",
         "options": [],
+    },
+    {
+        "name": "bankroll",
+        "description": "Tell the bot how much money you currently have, for accurate position sizing",
+        "options": [
+            {"name": "amount", "description": "Your current bankroll, e.g. 50000", "type": 10, "required": True, "min_value": 1},
+        ],
+    },
+    {
+        "name": "target",
+        "description": "Set your remembered default profit target %, used for future /invest calls",
+        "options": [
+            {"name": "percent", "description": "e.g. 10 for +10%", "type": 10, "required": True, "min_value": 0.1, "max_value": 1000},
+        ],
     },
 ]
 

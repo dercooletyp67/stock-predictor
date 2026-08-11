@@ -18,6 +18,7 @@ from nacl.exceptions import BadSignatureError
 from predictor import (
     load_config, get_bot_token, get_channel_id, load_state, save_state, run_pass,
     get_signal, get_position, set_position, compute_pnl_pct, USER_ID as ALLOWED_USER_ID,
+    get_effective_config, get_default_target_pct, evaluate_position_action,
 )
 
 app = Flask(__name__)
@@ -29,14 +30,17 @@ HELP_TEXT = (
     "**Commands**\n"
     "`/invest ticker:NVDA direction:long` — start tracking a position at the current price. "
     "`direction` can be `long`, `short`, or `auto` (bot picks based on the live signal, or declines if it's neutral). "
-    "Optional `stop_loss_pct` — SELL alert fires if you're down that much, even without a signal reversal.\n"
+    "Optional `stop_loss_pct` — SELL alert fires if you're down that much. "
+    "Optional `take_profit_pct` — overrides your remembered `/target` for just this trade.\n"
     "`/close ticker:NVDA` — stop tracking a position (you already sold/closed it in-game).\n"
     "`/status` — private summary of everything you're tracking, with STAY/SELL and live P/L for each.\n"
     "`/best` — the single highest-confidence LONG/SHORT signal across all tracked tickers right now.\n"
     "`/check ticker:NVDA` — look up any ticker's current signal/indicators, whether or not you've invested.\n"
+    "`/bankroll amount:50000` — tell the bot how much money you have, so suggested position sizes stay accurate.\n"
+    "`/target percent:10` — remembered default: SELL alert once a position is up this much %, for all future `/invest` calls.\n"
     "`/help` — this message.\n\n"
     "You'll also get automatic messages: a digest when new signals appear on tickers you haven't invested in, "
-    "a portfolio update for whatever you're tracking, and an hourly heartbeat confirming the bot is alive."
+    "a portfolio update (pings you when action is needed) for whatever you're tracking, and an hourly heartbeat."
 )
 
 # Serializes state.json read-modify-write across concurrent requests (Discord interactions
@@ -96,7 +100,7 @@ def discord_followup(application_id: str, interaction_token: str, content: str):
     requests.patch(url, json={"content": content}, timeout=10)
 
 
-def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict, stop_loss_pct=None):
+def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict, stop_loss_pct=None, take_profit_pct=None):
     ticker = ticker.upper()
     direction = direction.upper()
     try:
@@ -119,13 +123,18 @@ def handle_invest(application_id: str, interaction_token: str, ticker: str, dire
 
         with STATE_LOCK:
             state = load_state()
-            set_position(state, ticker, direction, info["price"], stop_loss_pct)
+            effective_take_profit = take_profit_pct if take_profit_pct is not None else get_default_target_pct(state)
+            set_position(state, ticker, direction, info["price"], stop_loss_pct, effective_take_profit)
             save_state(state)
 
-        stop_loss_note = f" Stop-loss set at -{stop_loss_pct}%." if stop_loss_pct else ""
+        risk_note = ""
+        if stop_loss_pct:
+            risk_note += f" Stop-loss at -{stop_loss_pct}%."
+        if effective_take_profit:
+            risk_note += f" Take-profit at +{effective_take_profit}%."
         discord_followup(
             application_id, interaction_token,
-            f"Tracking **{direction} {ticker}** from entry **${info['price']:.2f}**{note}.{stop_loss_note} "
+            f"Tracking **{direction} {ticker}** from entry **${info['price']:.2f}**{note}.{risk_note} "
             f"You'll get HOLD/SELL updates on every check from now on.",
         )
     except Exception as e:
@@ -136,13 +145,39 @@ def handle_close(application_id: str, interaction_token: str, ticker: str):
     ticker = ticker.upper()
     with STATE_LOCK:
         state = load_state()
-        signal, entry_price, _ = get_position(state, ticker)
+        signal, entry_price, _, _ = get_position(state, ticker)
         if signal not in ("LONG", "SHORT"):
             discord_followup(application_id, interaction_token, f"No open position tracked for `{ticker}`.")
             return
         set_position(state, ticker, "NEUTRAL", None)
         save_state(state)
     discord_followup(application_id, interaction_token, f"Stopped tracking **{signal} {ticker}**.")
+
+
+def handle_bankroll(application_id: str, interaction_token: str, amount: float):
+    if amount <= 0:
+        discord_followup(application_id, interaction_token, "Bankroll must be a positive number.")
+        return
+    with STATE_LOCK:
+        state = load_state()
+        state["bankroll"] = amount
+        save_state(state)
+    discord_followup(application_id, interaction_token, f"Bankroll set to **${amount:,.0f}**. Position sizing suggestions will now use this.")
+
+
+def handle_target(application_id: str, interaction_token: str, percent: float):
+    if percent <= 0:
+        discord_followup(application_id, interaction_token, "Target must be a positive number.")
+        return
+    with STATE_LOCK:
+        state = load_state()
+        state["target_profit_pct"] = percent
+        save_state(state)
+    discord_followup(
+        application_id, interaction_token,
+        f"Default profit target set to **+{percent}%**. Future `/invest` calls will use this unless you override with `take_profit_pct`. "
+        f"Existing tracked positions aren't affected retroactively.",
+    )
 
 
 def handle_status(application_id: str, interaction_token: str, cfg: dict):
@@ -156,7 +191,7 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
 
     lines = []
     for ticker in open_tickers:
-        position, entry_price, stop_loss_pct = get_position(state, ticker)
+        position, entry_price, stop_loss_pct, take_profit_pct = get_position(state, ticker)
         try:
             info = get_signal(ticker, cfg)
         except Exception:
@@ -171,18 +206,7 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
         pnl_pct = compute_pnl_pct(entry_price, price, position)
         pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
 
-        stop_loss_hit = (
-            stop_loss_pct is not None and pnl_pct is not None and pnl_pct <= -abs(stop_loss_pct)
-        )
-
-        if stop_loss_hit:
-            action = f"SELL — STOP LOSS HIT ({pnl_pct:.2f}% ≤ -{abs(stop_loss_pct):.1f}%)"
-        elif current_signal == position:
-            action = "STAY / HOLD"
-        elif current_signal == "NEUTRAL":
-            action = "SELL — signal faded to neutral"
-        else:
-            action = f"SELL — signal reversed to {current_signal}"
+        action = evaluate_position_action(position, entry_price, stop_loss_pct, take_profit_pct, current_signal, pnl_pct)
 
         entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
         lines.append(f"**{ticker}** ({position} @ {entry_str}, now ${price:.2f}{pnl_str}): **{action}**")
@@ -273,7 +297,8 @@ def discord_interactions():
                 "data": {"content": "You're not authorized to use this bot.", "flags": 64},  # 64 = ephemeral
             })
 
-        cfg = load_config()
+        with STATE_LOCK:
+            cfg = get_effective_config(load_config(), load_state())
         application_id = body["application_id"]
         interaction_token = body["token"]
         command_name = body["data"]["name"]
@@ -288,7 +313,7 @@ def discord_interactions():
         if command_name == "invest":
             threading.Thread(
                 target=handle_invest,
-                args=(application_id, interaction_token, options["ticker"], options["direction"], cfg, options.get("stop_loss_pct")),
+                args=(application_id, interaction_token, options["ticker"], options["direction"], cfg, options.get("stop_loss_pct"), options.get("take_profit_pct")),
                 daemon=True,
             ).start()
         elif command_name == "close":
@@ -313,6 +338,18 @@ def discord_interactions():
             threading.Thread(
                 target=handle_check,
                 args=(application_id, interaction_token, options["ticker"], cfg),
+                daemon=True,
+            ).start()
+        elif command_name == "bankroll":
+            threading.Thread(
+                target=handle_bankroll,
+                args=(application_id, interaction_token, options["amount"]),
+                daemon=True,
+            ).start()
+        elif command_name == "target":
+            threading.Thread(
+                target=handle_target,
+                args=(application_id, interaction_token, options["percent"]),
                 daemon=True,
             ).start()
 

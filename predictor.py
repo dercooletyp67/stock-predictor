@@ -257,16 +257,48 @@ def get_position(state: dict, ticker: str):
     """Positions ONLY exist here if the user explicitly declared them via /invest."""
     pos = state.get("positions", {}).get(ticker)
     if pos:
-        return pos.get("signal", "NEUTRAL"), pos.get("entry_price"), pos.get("stop_loss_pct")
-    return "NEUTRAL", None, None
+        return pos.get("signal", "NEUTRAL"), pos.get("entry_price"), pos.get("stop_loss_pct"), pos.get("take_profit_pct")
+    return "NEUTRAL", None, None, None
 
 
-def set_position(state: dict, ticker: str, signal: str, entry_price, stop_loss_pct=None):
+def set_position(state: dict, ticker: str, signal: str, entry_price, stop_loss_pct=None, take_profit_pct=None):
     positions = state.setdefault("positions", {})
     if signal in ("LONG", "SHORT"):
-        positions[ticker] = {"signal": signal, "entry_price": entry_price, "stop_loss_pct": stop_loss_pct}
+        positions[ticker] = {
+            "signal": signal, "entry_price": entry_price,
+            "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct,
+        }
     else:
         positions.pop(ticker, None)
+
+
+def get_bankroll(cfg: dict, state: dict) -> float:
+    return state.get("bankroll", cfg["bankroll"])
+
+
+def get_effective_config(cfg: dict, state: dict) -> dict:
+    """cfg with the user's current /bankroll amount applied, so sizing suggestions stay accurate."""
+    return {**cfg, "bankroll": get_bankroll(cfg, state)}
+
+
+def get_default_target_pct(state: dict):
+    return state.get("target_profit_pct")
+
+
+def evaluate_position_action(position: str, entry_price, stop_loss_pct, take_profit_pct, current_signal: str, pnl_pct):
+    """Shared STAY/SELL logic used by both the automatic portfolio message and /status."""
+    stop_loss_hit = stop_loss_pct is not None and pnl_pct is not None and pnl_pct <= -abs(stop_loss_pct)
+    take_profit_hit = take_profit_pct is not None and pnl_pct is not None and pnl_pct >= abs(take_profit_pct)
+
+    if stop_loss_hit:
+        return f"SELL — STOP LOSS HIT ({pnl_pct:.2f}% ≤ -{abs(stop_loss_pct):.1f}%)"
+    if take_profit_hit:
+        return f"SELL — TAKE PROFIT HIT (+{pnl_pct:.2f}% ≥ +{abs(take_profit_pct):.1f}%)"
+    if current_signal == position:
+        return "STAY / HOLD"
+    if current_signal == "NEUTRAL":
+        return "SELL — signal faded to neutral"
+    return f"SELL — signal reversed to {current_signal}"
 
 
 def get_scanner_signal(state: dict, ticker: str) -> str:
@@ -279,6 +311,7 @@ def set_scanner_signal(state: dict, ticker: str, signal: str):
 
 
 def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_id: str, heartbeat_channel_id: str, last_signal: dict) -> dict:
+    cfg = get_effective_config(cfg, last_signal)
     current_signals = {}
     errors = {}
     new_signals = []
@@ -315,6 +348,7 @@ def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_
         for ticker, pos in positions.items():
             position, entry_price = pos["signal"], pos["entry_price"]
             stop_loss_pct = pos.get("stop_loss_pct")
+            take_profit_pct = pos.get("take_profit_pct")
             try:
                 info = get_signal(ticker, cfg)
             except Exception as e:
@@ -330,18 +364,7 @@ def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_
             pnl_pct = compute_pnl_pct(entry_price, price, position)
             pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
 
-            stop_loss_hit = (
-                stop_loss_pct is not None and pnl_pct is not None and pnl_pct <= -abs(stop_loss_pct)
-            )
-
-            if stop_loss_hit:
-                action = f"SELL — STOP LOSS HIT ({pnl_pct:.2f}% ≤ -{abs(stop_loss_pct):.1f}%)"
-            elif current_signal == position:
-                action = "STAY / HOLD"
-            elif current_signal == "NEUTRAL":
-                action = "SELL — signal faded to neutral"
-            else:
-                action = f"SELL — signal reversed to {current_signal}"
+            action = evaluate_position_action(position, entry_price, stop_loss_pct, take_profit_pct, current_signal, pnl_pct)
 
             entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
             lines.append(f"**{ticker}** ({position} @ {entry_str} → ${price:.2f}{pnl_str}): **{action}**")
