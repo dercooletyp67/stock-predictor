@@ -24,6 +24,7 @@ app = Flask(__name__)
 
 DISCORD_PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY", "")
 DISCORD_API = "https://discord.com/api/v10"
+ALLOWED_USER_ID = "937305776526065675"
 
 # Serializes state.json read-modify-write across concurrent requests (Discord interactions
 # and /run-check can overlap on Render's single worker).
@@ -151,6 +152,13 @@ def discord_interactions():
         return jsonify({"type": 1})
 
     if body["type"] == 2:  # APPLICATION_COMMAND
+        invoking_user = (body.get("member") or {}).get("user") or body.get("user") or {}
+        if invoking_user.get("id") != ALLOWED_USER_ID:
+            return jsonify({
+                "type": 4,  # CHANNEL_MESSAGE_WITH_SOURCE
+                "data": {"content": "You're not authorized to use this bot.", "flags": 64},  # 64 = ephemeral
+            })
+
         cfg = load_config()
         application_id = body["application_id"]
         interaction_token = body["token"]
