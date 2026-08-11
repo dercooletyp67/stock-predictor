@@ -168,6 +168,43 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
     discord_followup(application_id, interaction_token, "\n".join(lines))
 
 
+def handle_best(application_id: str, interaction_token: str, cfg: dict):
+    candidates = []
+    for ticker in cfg["tickers"]:
+        try:
+            info = get_signal(ticker, cfg)
+        except Exception:
+            continue
+        if info and info["signal"] != "NEUTRAL":
+            candidates.append(info)
+
+    if not candidates:
+        discord_followup(
+            application_id, interaction_token,
+            "No ticker has a clear LONG/SHORT signal right now — nothing stands out. Try again in a bit.",
+        )
+        return
+
+    candidates.sort(key=lambda i: i["confidence"], reverse=True)
+    best = candidates[0]
+
+    lines = [
+        f"**Best right now: {best['signal']} {best['ticker']}** (confidence {best['confidence']*100:.0f}%)",
+        f"Price: ${best['price']:.2f} → target ${best['target_price']:.2f} "
+        f"({'+' if best['signal']=='LONG' else '-'}{best['projected_move_pct']:.2f}%)",
+        f"Suggested: {best['suggested_shares']} shares (~${best['suggested_amount']:,.0f})",
+    ]
+
+    runner_ups = candidates[1:4]
+    if runner_ups:
+        lines.append("")
+        lines.append("Other live signals:")
+        for c in runner_ups:
+            lines.append(f"• {c['signal']} {c['ticker']} (confidence {c['confidence']*100:.0f}%)")
+
+    discord_followup(application_id, interaction_token, "\n".join(lines))
+
+
 @app.route("/discord-interactions", methods=["POST"])
 def discord_interactions():
     if not verify_discord_signature(request):
@@ -207,6 +244,12 @@ def discord_interactions():
         elif command_name == "status":
             threading.Thread(
                 target=handle_status,
+                args=(application_id, interaction_token, cfg),
+                daemon=True,
+            ).start()
+        elif command_name == "best":
+            threading.Thread(
+                target=handle_best,
                 args=(application_id, interaction_token, cfg),
                 daemon=True,
             ).start()

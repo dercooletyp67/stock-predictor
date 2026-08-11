@@ -44,6 +44,11 @@ COMMANDS = [
         "description": "List all positions currently being tracked, with live P/L",
         "options": [],
     },
+    {
+        "name": "best",
+        "description": "Show the single highest-confidence LONG/SHORT opportunity right now",
+        "options": [],
+    },
 ]
 
 if __name__ == "__main__":
