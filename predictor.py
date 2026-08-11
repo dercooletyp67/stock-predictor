@@ -16,11 +16,13 @@ import requests
 import yfinance as yf
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+CONFIG_EXAMPLE_PATH = Path(__file__).parent / "config.example.json"
 STATE_PATH = Path(__file__).parent / "state.json"
 
 
 def load_config():
-    with open(CONFIG_PATH, "r") as f:
+    path = CONFIG_PATH if CONFIG_PATH.exists() else CONFIG_EXAMPLE_PATH
+    with open(path, "r") as f:
         return json.load(f)
 
 

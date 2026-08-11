@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: stock-predictor
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: DISCORD_WEBHOOK_URL
+        sync: false
+      - key: CHECK_SECRET
+        sync: false
