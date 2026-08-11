@@ -28,6 +28,7 @@ def load_config():
 
 
 DISCORD_API = "https://discord.com/api/v10"
+USER_ID = "937305776526065675"
 
 
 def get_bot_token(cfg: dict) -> str:
@@ -40,11 +41,14 @@ def get_channel_id(cfg: dict, name: str) -> str:
     return os.environ.get(env_key) or cfg.get(cfg_key, "")
 
 
-def post_channel_message(bot_token: str, channel_id: str, embed: dict):
+def post_channel_message(bot_token: str, channel_id: str, embed: dict, ping: bool = False):
+    payload = {"embeds": [embed]}
+    if ping:
+        payload["content"] = f"<@{USER_ID}>"
     resp = requests.post(
         f"{DISCORD_API}/channels/{channel_id}/messages",
         headers={"Authorization": f"Bot {bot_token}"},
-        json={"embeds": [embed]},
+        json=payload,
         timeout=10,
     )
     resp.raise_for_status()
@@ -222,14 +226,15 @@ def post_digest_to_discord(bot_token: str, channel_id: str, new_signals: list):
 
 def post_portfolio_to_discord(bot_token: str, channel_id: str, lines: list):
     """One consolidated message covering every position you declared via /invest."""
+    needs_sell = any("SELL" in line for line in lines)
     embed = {
-        "title": "Your positions",
-        "color": 10181046,  # purple
+        "title": "Your positions" + (" — ACTION NEEDED" if needs_sell else ""),
+        "color": 15158332 if needs_sell else 10181046,  # red if action needed, else purple
         "description": "\n".join(lines),
         "footer": {"text": "Status update for your declared positions. Not a guarantee. Not financial advice."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    post_channel_message(bot_token, channel_id, embed)
+    post_channel_message(bot_token, channel_id, embed, ping=needs_sell)
 
 
 def post_heartbeat_to_discord(bot_token: str, channel_id: str, current_signals: dict, errors: dict):

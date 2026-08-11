@@ -17,14 +17,13 @@ from nacl.exceptions import BadSignatureError
 
 from predictor import (
     load_config, get_bot_token, get_channel_id, load_state, save_state, run_pass,
-    get_signal, get_position, set_position, compute_pnl_pct,
+    get_signal, get_position, set_position, compute_pnl_pct, USER_ID as ALLOWED_USER_ID,
 )
 
 app = Flask(__name__)
 
 DISCORD_PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY", "")
 DISCORD_API = "https://discord.com/api/v10"
-ALLOWED_USER_ID = "937305776526065675"
 
 HELP_TEXT = (
     "**Commands**\n"
