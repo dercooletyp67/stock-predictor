@@ -8,6 +8,8 @@ services:
     envVars:
       - key: DISCORD_WEBHOOK_URL
         sync: false
+      - key: DISCORD_HEARTBEAT_WEBHOOK_URL
+        sync: false
       - key: CHECK_SECRET
         sync: false
       - key: DISCORD_PUBLIC_KEY

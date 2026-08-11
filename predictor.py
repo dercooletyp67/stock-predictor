@@ -30,6 +30,14 @@ def get_webhook_url(cfg: dict) -> str:
     return os.environ.get("DISCORD_WEBHOOK_URL") or cfg.get("discord_webhook_url", "")
 
 
+def get_heartbeat_webhook_url(cfg: dict) -> str:
+    return (
+        os.environ.get("DISCORD_HEARTBEAT_WEBHOOK_URL")
+        or cfg.get("discord_heartbeat_webhook_url", "")
+        or get_webhook_url(cfg)
+    )
+
+
 def load_state() -> dict:
     if STATE_PATH.exists():
         with open(STATE_PATH, "r") as f:
@@ -298,7 +306,8 @@ def set_position(state: dict, ticker: str, signal: str, entry_price):
     state[ticker] = {"signal": signal, "entry_price": entry_price if signal != "NEUTRAL" else None}
 
 
-def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
+def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_url: str = None) -> dict:
+    heartbeat_webhook_url = heartbeat_webhook_url or webhook_url
     current_signals = {}
     errors = {}
 
@@ -353,7 +362,7 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict) -> dict:
 
     if due_for_heartbeat:
         try:
-            post_heartbeat_to_discord(webhook_url, current_signals, errors)
+            post_heartbeat_to_discord(heartbeat_webhook_url, current_signals, errors)
             print("posted heartbeat")
             last_signal["_last_heartbeat"] = now.isoformat()
         except Exception as e:
@@ -373,18 +382,19 @@ def main():
 
     cfg = load_config()
     webhook_url = get_webhook_url(cfg)
+    heartbeat_webhook_url = get_heartbeat_webhook_url(cfg)
     if not webhook_url:
         raise SystemExit("No Discord webhook URL configured (set discord_webhook_url in config.json or DISCORD_WEBHOOK_URL env var).")
 
     if args.once:
         last_signal = load_state()
-        last_signal = run_pass(cfg, webhook_url, last_signal)
+        last_signal = run_pass(cfg, webhook_url, last_signal, heartbeat_webhook_url)
         save_state(last_signal)
     else:
         last_signal = {}
         print("Starting predictor loop. Ctrl+C to stop.")
         while True:
-            last_signal = run_pass(cfg, webhook_url, last_signal)
+            last_signal = run_pass(cfg, webhook_url, last_signal, heartbeat_webhook_url)
             time.sleep(cfg["poll_interval_seconds"])
 
 

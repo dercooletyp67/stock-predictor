@@ -16,7 +16,7 @@ from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
 
 from predictor import (
-    load_config, get_webhook_url, load_state, save_state, run_pass,
+    load_config, get_webhook_url, get_heartbeat_webhook_url, load_state, save_state, run_pass,
     get_signal, get_position, set_position, compute_pnl_pct,
 )
 
@@ -45,12 +45,13 @@ def run_check():
 
     cfg = load_config()
     webhook_url = get_webhook_url(cfg)
+    heartbeat_webhook_url = get_heartbeat_webhook_url(cfg)
     if not webhook_url:
         return jsonify({"error": "no webhook url configured"}), 500
 
     with STATE_LOCK:
         state = load_state()
-        state = run_pass(cfg, webhook_url, state)
+        state = run_pass(cfg, webhook_url, state, heartbeat_webhook_url)
         save_state(state)
 
     return jsonify({"status": "ok", "signals": {k: v for k, v in state.items() if not k.startswith("_")}})

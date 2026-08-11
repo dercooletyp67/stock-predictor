@@ -1,5 +1,6 @@
 {
   "discord_webhook_url": "",
+  "discord_heartbeat_webhook_url": "",
   "tickers": ["NVDA", "GOOGL", "JNJ", "SNDK", "MSFT", "AMZN", "META", "TSLA", "MU", "INTC", "BE", "TTWO", "KO", "MCD", "WMT", "PG", "SPCX", "WYFI"],
   "poll_interval_seconds": 180,
   "short_ema_period": 9,
