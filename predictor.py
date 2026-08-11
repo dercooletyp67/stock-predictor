@@ -301,6 +301,22 @@ def evaluate_position_action(position: str, entry_price, stop_loss_pct, take_pro
     return f"SELL — signal reversed to {current_signal}"
 
 
+def compute_early_warning(position: str, info: dict) -> bool:
+    """
+    True when exactly ONE of the two directional confirmations (trend, MACD) has already
+    flipped against the position but the other hasn't yet — a real, data-derived heads-up
+    that a reversal may be close. Not a time estimate (e.g. "3 min before") — that can't be
+    honestly predicted. If BOTH had flipped, the signal itself would already show SELL.
+    """
+    if position == "LONG":
+        trend_against = info["short_ema"] < info["long_ema"]
+        macd_against = info["macd_line"] < info["macd_signal_line"]
+    else:
+        trend_against = info["short_ema"] > info["long_ema"]
+        macd_against = info["macd_line"] > info["macd_signal_line"]
+    return trend_against != macd_against
+
+
 def get_scanner_signal(state: dict, ticker: str) -> str:
     """Last signal the automatic scanner observed for this ticker, independent of any declared position."""
     return state.get("_scanner_signals", {}).get(ticker, "NEUTRAL")
@@ -365,6 +381,8 @@ def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_
             pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
 
             action = evaluate_position_action(position, entry_price, stop_loss_pct, take_profit_pct, current_signal, pnl_pct)
+            if action == "STAY / HOLD" and compute_early_warning(position, info):
+                action += " ⚠️ (momentum turning against you — watch closely)"
 
             entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
             lines.append(f"**{ticker}** ({position} @ {entry_str} → ${price:.2f}{pnl_str}): **{action}**")

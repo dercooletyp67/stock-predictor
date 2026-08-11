@@ -18,7 +18,7 @@ from nacl.exceptions import BadSignatureError
 from predictor import (
     load_config, get_bot_token, get_channel_id, load_state, save_state, run_pass,
     get_signal, get_position, set_position, compute_pnl_pct, USER_ID as ALLOWED_USER_ID,
-    get_effective_config, get_default_target_pct, evaluate_position_action,
+    get_effective_config, get_default_target_pct, evaluate_position_action, compute_early_warning,
 )
 
 app = Flask(__name__)
@@ -36,11 +36,13 @@ HELP_TEXT = (
     "`/status` — private summary of everything you're tracking, with STAY/SELL and live P/L for each.\n"
     "`/best` — the single highest-confidence LONG/SHORT signal across all tracked tickers right now.\n"
     "`/check ticker:NVDA` — look up any ticker's current signal/indicators, whether or not you've invested.\n"
+    "`/signals` — full board: every tracked ticker's current signal, on demand.\n"
     "`/bankroll amount:50000` — tell the bot how much money you have, so suggested position sizes stay accurate.\n"
     "`/target percent:10` — remembered default: SELL alert once a position is up this much %, for all future `/invest` calls.\n"
     "`/help` — this message.\n\n"
     "You'll also get automatic messages: a digest when new signals appear on tickers you haven't invested in, "
-    "a portfolio update (pings you when action is needed) for whatever you're tracking, and an hourly heartbeat."
+    "a portfolio update (pings you when action is needed) for whatever you're tracking, and an hourly heartbeat. "
+    "HOLD lines may show a ⚠️ if momentum looks like it's starting to turn — a heads-up, not a guarantee or a timer."
 )
 
 # Serializes state.json read-modify-write across concurrent requests (Discord interactions
@@ -207,6 +209,8 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
         pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
 
         action = evaluate_position_action(position, entry_price, stop_loss_pct, take_profit_pct, current_signal, pnl_pct)
+        if action == "STAY / HOLD" and compute_early_warning(position, info):
+            action += " ⚠️ (momentum turning against you — watch closely)"
 
         entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
         lines.append(f"**{ticker}** ({position} @ {entry_str}, now ${price:.2f}{pnl_str}): **{action}**")
@@ -275,6 +279,26 @@ def handle_check(application_id: str, interaction_token: str, ticker: str, cfg: 
     if info["signal"] != "NEUTRAL":
         lines.insert(1, f"Target: ${info['target_price']:.2f} ({'+' if info['signal']=='LONG' else '-'}{info['projected_move_pct']:.2f}%)")
         lines.insert(2, f"Suggested: {info['suggested_shares']} shares (~${info['suggested_amount']:,.0f}), confidence {info['confidence']*100:.0f}%")
+
+    discord_followup(application_id, interaction_token, "\n".join(lines))
+
+
+def handle_signals(application_id: str, interaction_token: str, cfg: dict):
+    lines = []
+    for ticker in cfg["tickers"]:
+        try:
+            info = get_signal(ticker, cfg)
+        except Exception:
+            lines.append(f"**{ticker}**: error fetching data")
+            continue
+
+        if info is None:
+            lines.append(f"**{ticker}**: not enough data")
+        elif info["signal"] == "NEUTRAL":
+            lines.append(f"{ticker}: NEUTRAL")
+        else:
+            arrow = "🟢" if info["signal"] == "LONG" else "🔴"
+            lines.append(f"{arrow} **{info['signal']} {ticker}** @ ${info['price']:.2f} (confidence {info['confidence']*100:.0f}%)")
 
     discord_followup(application_id, interaction_token, "\n".join(lines))
 
@@ -350,6 +374,12 @@ def discord_interactions():
             threading.Thread(
                 target=handle_target,
                 args=(application_id, interaction_token, options["percent"]),
+                daemon=True,
+            ).start()
+        elif command_name == "signals":
+            threading.Thread(
+                target=handle_signals,
+                args=(application_id, interaction_token, cfg),
                 daemon=True,
             ).start()
 

@@ -91,6 +91,11 @@ COMMANDS = [
             {"name": "percent", "description": "e.g. 10 for +10%", "type": 10, "required": True, "min_value": 0.1, "max_value": 1000},
         ],
     },
+    {
+        "name": "signals",
+        "description": "Full board: every tracked ticker's current signal, on demand",
+        "options": [],
+    },
 ]
 
 if __name__ == "__main__":
