@@ -33,6 +33,7 @@ HELP_TEXT = (
     "`/close ticker:NVDA` — stop tracking a position (you already sold/closed it in-game).\n"
     "`/status` — private summary of everything you're tracking, with STAY/SELL and live P/L for each.\n"
     "`/best` — the single highest-confidence LONG/SHORT signal across all tracked tickers right now.\n"
+    "`/check ticker:NVDA` — look up any ticker's current signal/indicators, whether or not you've invested.\n"
     "`/help` — this message.\n\n"
     "You'll also get automatic messages: a digest when new signals appear on tickers you haven't invested in, "
     "a portfolio update for whatever you're tracking, and an hourly heartbeat confirming the bot is alive."
@@ -226,6 +227,34 @@ def handle_best(application_id: str, interaction_token: str, cfg: dict):
     discord_followup(application_id, interaction_token, "\n".join(lines))
 
 
+def handle_check(application_id: str, interaction_token: str, ticker: str, cfg: dict):
+    ticker = ticker.upper()
+    try:
+        info = get_signal(ticker, cfg)
+    except Exception as e:
+        discord_followup(application_id, interaction_token, f"Error checking `{ticker}`: {e}")
+        return
+
+    if info is None:
+        discord_followup(application_id, interaction_token, f"Couldn't get data for `{ticker}` — check the symbol is right.")
+        return
+
+    lines = [
+        f"**{ticker}: {info['signal']}**",
+        f"Price: ${info['price']:.2f}",
+        f"RSI: {info['rsi']:.1f}",
+        f"EMA9 / EMA21: {info['short_ema']:.2f} / {info['long_ema']:.2f}",
+        f"MACD / Signal: {info['macd_line']:.3f} / {info['macd_signal_line']:.3f}",
+        f"Volume confirmed: {'Yes' if info['volume_confirmed'] else 'No'}",
+    ]
+
+    if info["signal"] != "NEUTRAL":
+        lines.insert(1, f"Target: ${info['target_price']:.2f} ({'+' if info['signal']=='LONG' else '-'}{info['projected_move_pct']:.2f}%)")
+        lines.insert(2, f"Suggested: {info['suggested_shares']} shares (~${info['suggested_amount']:,.0f}), confidence {info['confidence']*100:.0f}%")
+
+    discord_followup(application_id, interaction_token, "\n".join(lines))
+
+
 @app.route("/discord-interactions", methods=["POST"])
 def discord_interactions():
     if not verify_discord_signature(request):
@@ -278,6 +307,12 @@ def discord_interactions():
             threading.Thread(
                 target=handle_best,
                 args=(application_id, interaction_token, cfg),
+                daemon=True,
+            ).start()
+        elif command_name == "check":
+            threading.Thread(
+                target=handle_check,
+                args=(application_id, interaction_token, options["ticker"], cfg),
                 daemon=True,
             ).start()
 

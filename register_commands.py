@@ -58,6 +58,13 @@ COMMANDS = [
         "options": [],
     },
     {
+        "name": "check",
+        "description": "Look up any ticker's current signal and indicators, even if you haven't invested",
+        "options": [
+            {"name": "ticker", "description": "Stock ticker, e.g. NVDA", "type": 3, "required": True},
+        ],
+    },
+    {
         "name": "help",
         "description": "List all commands and what they do",
         "options": [],
