@@ -6,9 +6,13 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
-      - key: DISCORD_WEBHOOK_URL
+      - key: DISCORD_BOT_TOKEN
         sync: false
-      - key: DISCORD_HEARTBEAT_WEBHOOK_URL
+      - key: DISCORD_SIGNALS_CHANNEL_ID
+        sync: false
+      - key: DISCORD_TRADES_CHANNEL_ID
+        sync: false
+      - key: DISCORD_HEARTBEAT_CHANNEL_ID
         sync: false
       - key: CHECK_SECRET
         sync: false

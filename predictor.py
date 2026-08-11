@@ -1,5 +1,6 @@
 """
-Polls real-time-ish stock data and posts long/short signals to a Discord webhook.
+Polls real-time-ish stock data and posts long/short signals to Discord via the bot,
+routed to different channels (signals / trades / heartbeat) by channel ID.
 
 Signal is based on simple technical indicators (EMA crossover + RSI) — it is a
 decision aid, not a guarantee. No tool can reliably predict short-term price moves.
@@ -26,16 +27,27 @@ def load_config():
         return json.load(f)
 
 
-def get_webhook_url(cfg: dict) -> str:
-    return os.environ.get("DISCORD_WEBHOOK_URL") or cfg.get("discord_webhook_url", "")
+DISCORD_API = "https://discord.com/api/v10"
 
 
-def get_heartbeat_webhook_url(cfg: dict) -> str:
-    return (
-        os.environ.get("DISCORD_HEARTBEAT_WEBHOOK_URL")
-        or cfg.get("discord_heartbeat_webhook_url", "")
-        or get_webhook_url(cfg)
+def get_bot_token(cfg: dict) -> str:
+    return os.environ.get("DISCORD_BOT_TOKEN") or cfg.get("discord_bot_token", "")
+
+
+def get_channel_id(cfg: dict, name: str) -> str:
+    env_key = f"DISCORD_{name.upper()}_CHANNEL_ID"
+    cfg_key = f"discord_{name}_channel_id"
+    return os.environ.get(env_key) or cfg.get(cfg_key, "")
+
+
+def post_channel_message(bot_token: str, channel_id: str, embed: dict):
+    resp = requests.post(
+        f"{DISCORD_API}/channels/{channel_id}/messages",
+        headers={"Authorization": f"Bot {bot_token}"},
+        json={"embeds": [embed]},
+        timeout=10,
     )
+    resp.raise_for_status()
 
 
 def load_state() -> dict:
@@ -187,7 +199,7 @@ def compute_pnl_pct(entry_price, current_price, position):
     return direction * (current_price - entry_price) / entry_price * 100
 
 
-def post_digest_to_discord(webhook_url: str, new_signals: list):
+def post_digest_to_discord(bot_token: str, channel_id: str, new_signals: list):
     """One consolidated message listing every ticker that newly crossed into LONG/SHORT this check."""
     lines = []
     for info in new_signals:
@@ -205,11 +217,10 @@ def post_digest_to_discord(webhook_url: str, new_signals: list):
         "footer": {"text": "Use /invest to start tracking any of these. Not a guarantee. Not financial advice."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
-    resp.raise_for_status()
+    post_channel_message(bot_token, channel_id, embed)
 
 
-def post_portfolio_to_discord(webhook_url: str, lines: list):
+def post_portfolio_to_discord(bot_token: str, channel_id: str, lines: list):
     """One consolidated message covering every position you declared via /invest."""
     embed = {
         "title": "Your positions",
@@ -218,11 +229,10 @@ def post_portfolio_to_discord(webhook_url: str, lines: list):
         "footer": {"text": "Status update for your declared positions. Not a guarantee. Not financial advice."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
-    resp.raise_for_status()
+    post_channel_message(bot_token, channel_id, embed)
 
 
-def post_heartbeat_to_discord(webhook_url: str, current_signals: dict, errors: dict):
+def post_heartbeat_to_discord(bot_token: str, channel_id: str, current_signals: dict, errors: dict):
     lines = []
     for ticker, signal in current_signals.items():
         marker = " (data error)" if ticker in errors else ""
@@ -235,8 +245,7 @@ def post_heartbeat_to_discord(webhook_url: str, current_signals: dict, errors: d
         "footer": {"text": "Periodic health check. No action needed unless a ticker shows a data error."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
-    resp.raise_for_status()
+    post_channel_message(bot_token, channel_id, embed)
 
 
 def get_position(state: dict, ticker: str):
@@ -264,8 +273,7 @@ def set_scanner_signal(state: dict, ticker: str, signal: str):
     state.setdefault("_scanner_signals", {})[ticker] = signal
 
 
-def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_url: str = None) -> dict:
-    heartbeat_webhook_url = heartbeat_webhook_url or webhook_url
+def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_id: str, heartbeat_channel_id: str, last_signal: dict) -> dict:
     current_signals = {}
     errors = {}
     new_signals = []
@@ -291,7 +299,7 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_u
 
     if new_signals:
         try:
-            post_digest_to_discord(webhook_url, new_signals)
+            post_digest_to_discord(bot_token, signals_channel_id, new_signals)
             print(f"posted digest with {len(new_signals)} new signal(s)")
         except Exception as e:
             print(f"digest post error: {e}")
@@ -334,7 +342,7 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_u
             lines.append(f"**{ticker}** ({position} @ {entry_str} → ${price:.2f}{pnl_str}): **{action}**")
 
         try:
-            post_portfolio_to_discord(webhook_url, lines)
+            post_portfolio_to_discord(bot_token, trades_channel_id, lines)
             print(f"posted portfolio update for {len(positions)} position(s)")
         except Exception as e:
             print(f"portfolio post error: {e}")
@@ -349,7 +357,7 @@ def run_pass(cfg: dict, webhook_url: str, last_signal: dict, heartbeat_webhook_u
 
     if due_for_heartbeat:
         try:
-            post_heartbeat_to_discord(heartbeat_webhook_url, current_signals, errors)
+            post_heartbeat_to_discord(bot_token, heartbeat_channel_id, current_signals, errors)
             print("posted heartbeat")
             last_signal["_last_heartbeat"] = now.isoformat()
         except Exception as e:
@@ -368,20 +376,24 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config()
-    webhook_url = get_webhook_url(cfg)
-    heartbeat_webhook_url = get_heartbeat_webhook_url(cfg)
-    if not webhook_url:
-        raise SystemExit("No Discord webhook URL configured (set discord_webhook_url in config.json or DISCORD_WEBHOOK_URL env var).")
+    bot_token = get_bot_token(cfg)
+    signals_channel_id = get_channel_id(cfg, "signals")
+    trades_channel_id = get_channel_id(cfg, "trades")
+    heartbeat_channel_id = get_channel_id(cfg, "heartbeat")
+    if not bot_token:
+        raise SystemExit("No Discord bot token configured (set discord_bot_token in config.json or DISCORD_BOT_TOKEN env var).")
+    if not (signals_channel_id and trades_channel_id and heartbeat_channel_id):
+        raise SystemExit("Missing one or more channel IDs (discord_signals_channel_id, discord_trades_channel_id, discord_heartbeat_channel_id).")
 
     if args.once:
         last_signal = load_state()
-        last_signal = run_pass(cfg, webhook_url, last_signal, heartbeat_webhook_url)
+        last_signal = run_pass(cfg, bot_token, signals_channel_id, trades_channel_id, heartbeat_channel_id, last_signal)
         save_state(last_signal)
     else:
         last_signal = {}
         print("Starting predictor loop. Ctrl+C to stop.")
         while True:
-            last_signal = run_pass(cfg, webhook_url, last_signal, heartbeat_webhook_url)
+            last_signal = run_pass(cfg, bot_token, signals_channel_id, trades_channel_id, heartbeat_channel_id, last_signal)
             time.sleep(cfg["poll_interval_seconds"])
 
 

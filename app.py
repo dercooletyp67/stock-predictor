@@ -16,7 +16,7 @@ from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
 
 from predictor import (
-    load_config, get_webhook_url, get_heartbeat_webhook_url, load_state, save_state, run_pass,
+    load_config, get_bot_token, get_channel_id, load_state, save_state, run_pass,
     get_signal, get_position, set_position, compute_pnl_pct,
 )
 
@@ -57,14 +57,16 @@ def run_check():
         return jsonify({"error": "unauthorized"}), 403
 
     cfg = load_config()
-    webhook_url = get_webhook_url(cfg)
-    heartbeat_webhook_url = get_heartbeat_webhook_url(cfg)
-    if not webhook_url:
-        return jsonify({"error": "no webhook url configured"}), 500
+    bot_token = get_bot_token(cfg)
+    signals_channel_id = get_channel_id(cfg, "signals")
+    trades_channel_id = get_channel_id(cfg, "trades")
+    heartbeat_channel_id = get_channel_id(cfg, "heartbeat")
+    if not bot_token:
+        return jsonify({"error": "no bot token configured"}), 500
 
     with STATE_LOCK:
         state = load_state()
-        state = run_pass(cfg, webhook_url, state, heartbeat_webhook_url)
+        state = run_pass(cfg, bot_token, signals_channel_id, trades_channel_id, heartbeat_channel_id, state)
         save_state(state)
 
     return jsonify({

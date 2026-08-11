@@ -1,6 +1,9 @@
 {
-  "discord_webhook_url": "",
-  "discord_heartbeat_webhook_url": "",
+  "discord_bot_token": "",
+  "discord_signals_channel_id": "",
+  "discord_trades_channel_id": "",
+  "discord_heartbeat_channel_id": "",
+  "discord_test_channel_id": "",
   "tickers": ["NVDA", "GOOGL", "JNJ", "SNDK", "MSFT", "AMZN", "META", "TSLA", "MU", "INTC", "BE", "TTWO", "KO", "MCD", "WMT", "PG", "SPCX", "WYFI"],
   "poll_interval_seconds": 180,
   "short_ema_period": 9,
