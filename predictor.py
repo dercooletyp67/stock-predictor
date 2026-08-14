@@ -203,51 +203,106 @@ def compute_pnl_pct(entry_price, current_price, position):
     return direction * (current_price - entry_price) / entry_price * 100
 
 
+GUESS_NOTE = "This is a guess from price patterns. It can be wrong."
+
+
+def plain_bet(signal: str) -> str:
+    """The in-game button to press, said in plain words."""
+    if signal == "LONG":
+        return "press LONG (betting the price goes UP)"
+    if signal == "SHORT":
+        return "press SHORT (betting the price goes DOWN)"
+    return "wait — no clear move"
+
+
+def plain_reasons(info: dict) -> list:
+    """Explain what the indicators are saying, without the indicator names."""
+    reasons = []
+    reasons.append(
+        "Price direction: going up" if info["short_ema"] > info["long_ema"]
+        else "Price direction: going down"
+    )
+    reasons.append(
+        "Speed of the move: picking up" if info["macd_line"] > info["macd_signal_line"]
+        else "Speed of the move: slowing down"
+    )
+
+    rsi = info["rsi"]
+    if rsi >= 70:
+        reasons.append(f"Looks expensive right now ({rsi:.0f} out of 100)")
+    elif rsi <= 30:
+        reasons.append(f"Looks cheap right now ({rsi:.0f} out of 100)")
+    else:
+        reasons.append(f"Price is in a normal range ({rsi:.0f} out of 100)")
+
+    reasons.append(
+        "Lots of people trading it, so the move looks real" if info["volume_confirmed"]
+        else "Not many people trading it, so the move is weak"
+    )
+    return reasons
+
+
 def post_digest_to_discord(bot_token: str, channel_id: str, new_signals: list):
-    """One consolidated message listing every ticker that newly crossed into LONG/SHORT this check."""
+    """One message listing every stock that just became worth a bet."""
     lines = []
     for info in new_signals:
         arrow = "🟢" if info["signal"] == "LONG" else "🔴"
         lines.append(
-            f"{arrow} **{info['signal']} {info['ticker']}** @ ${info['price']:.2f} — "
-            f"{info['suggested_shares']} shares (conf {info['confidence']*100:.0f}%), "
-            f"target ${info['target_price']:.2f}"
+            f"{arrow} **{info['ticker']}** — {plain_bet(info['signal'])}\n"
+            f"Costs ${info['price']:.2f} each · buy about **{info['suggested_shares']} shares** · "
+            f"could reach ${info['target_price']:.2f} · {info['confidence']*100:.0f}% sure"
         )
 
+    count = len(new_signals)
     embed = {
-        "title": f"New signals ({len(new_signals)})",
+        "title": f"{count} new chance{'s' if count != 1 else ''} to bet",
         "color": 3447003,
-        "description": "\n".join(lines),
-        "footer": {"text": "Use /invest to start tracking any of these. Not a guarantee. Not financial advice."},
+        "description": "\n\n".join(lines),
+        "footer": {"text": f"Type /invest to have me watch one of these for you. {GUESS_NOTE}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     post_channel_message(bot_token, channel_id, embed)
 
 
-def post_portfolio_to_discord(bot_token: str, channel_id: str, lines: list):
-    """One consolidated message covering every position you declared via /invest."""
-    needs_sell = any("SELL" in line for line in lines)
+def post_portfolio_to_discord(bot_token: str, channel_id: str, lines: list, needs_sell: bool):
+    """One message covering every bet you told me about with /invest."""
     embed = {
-        "title": "Your positions" + (" — ACTION NEEDED" if needs_sell else ""),
-        "color": 15158332 if needs_sell else 10181046,  # red if action needed, else purple
-        "description": "\n".join(lines),
-        "footer": {"text": "Status update for your declared positions. Not a guarantee. Not financial advice."},
+        "title": "Your bets — SELL SOMETHING NOW" if needs_sell else "Your bets — nothing to do",
+        "color": 15158332 if needs_sell else 10181046,  # red if you need to act, else purple
+        "description": "\n\n".join(lines),
+        "footer": {"text": f"Type /sold once you've sold in the game. {GUESS_NOTE}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     post_channel_message(bot_token, channel_id, embed, ping=needs_sell)
 
 
 def post_heartbeat_to_discord(bot_token: str, channel_id: str, current_signals: dict, errors: dict):
-    lines = []
+    good_lines = []
+    waiting = []
+    broken = []
     for ticker, signal in current_signals.items():
-        marker = " (data error)" if ticker in errors else ""
-        lines.append(f"**{ticker}**: {signal}{marker}")
+        if ticker in errors:
+            broken.append(ticker)
+        elif signal == "LONG":
+            good_lines.append(f"🟢 **{ticker}** — press LONG (bet it goes up)")
+        elif signal == "SHORT":
+            good_lines.append(f"🔴 **{ticker}** — press SHORT (bet it goes down)")
+        else:
+            waiting.append(ticker)
+
+    parts = []
+    if good_lines:
+        parts.append("**Worth a bet right now:**\n" + "\n".join(good_lines))
+    if waiting:
+        parts.append(f"**Nothing happening ({len(waiting)}):** " + ", ".join(waiting))
+    if broken:
+        parts.append("**Could not get prices for:** " + ", ".join(broken))
 
     embed = {
-        "title": "Predictor heartbeat — still running",
+        "title": "I'm still running",
         "color": 3447003,  # blue
-        "description": "\n".join(lines) if lines else "No ticker data available this check.",
-        "footer": {"text": "Periodic health check. No action needed unless a ticker shows a data error."},
+        "description": "\n\n".join(parts) if parts else "No prices available this time.",
+        "footer": {"text": "Just checking in every hour so you know I'm alive. Nothing to do here."},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     post_channel_message(bot_token, channel_id, embed)
@@ -286,19 +341,22 @@ def get_default_target_pct(state: dict):
 
 
 def evaluate_position_action(position: str, entry_price, stop_loss_pct, take_profit_pct, current_signal: str, pnl_pct):
-    """Shared STAY/SELL logic used by both the automatic portfolio message and /status."""
+    """
+    Decide what to do with a bet, in plain words.
+    Returns (what_to_do, sell_now) so callers don't have to read the text to know if action is needed.
+    """
     stop_loss_hit = stop_loss_pct is not None and pnl_pct is not None and pnl_pct <= -abs(stop_loss_pct)
     take_profit_hit = take_profit_pct is not None and pnl_pct is not None and pnl_pct >= abs(take_profit_pct)
 
     if stop_loss_hit:
-        return f"SELL — STOP LOSS HIT ({pnl_pct:.2f}% ≤ -{abs(stop_loss_pct):.1f}%)"
+        return f"**SELL NOW** — you're down {abs(pnl_pct):.1f}%, worse than the {abs(stop_loss_pct):.0f}% loss you said to stop at", True
     if take_profit_hit:
-        return f"SELL — TAKE PROFIT HIT (+{pnl_pct:.2f}% ≥ +{abs(take_profit_pct):.1f}%)"
+        return f"**SELL NOW** — you made {pnl_pct:.1f}%, you hit the {abs(take_profit_pct):.0f}% profit you were aiming for", True
     if current_signal == position:
-        return "STAY / HOLD"
+        return "**KEEP IT** — still going your way", False
     if current_signal == "NEUTRAL":
-        return "SELL — signal faded to neutral"
-    return f"SELL — signal reversed to {current_signal}"
+        return "**SELL NOW** — the move has run out of steam", True
+    return "**SELL NOW** — it's turning the other way", True
 
 
 def compute_early_warning(position: str, info: dict) -> bool:
@@ -315,6 +373,35 @@ def compute_early_warning(position: str, info: dict) -> bool:
         trend_against = info["short_ema"] > info["long_ema"]
         macd_against = info["macd_line"] > info["macd_signal_line"]
     return trend_against != macd_against
+
+
+def format_bet_line(ticker: str, pos: dict, info):
+    """
+    One plain-English block describing a bet and what to do about it.
+    Returns (text, sell_now). Used by both the automatic message and /status so they always agree.
+    """
+    position = pos["signal"]
+    entry_price = pos.get("entry_price")
+    bet_word = "betting it goes UP" if position == "LONG" else "betting it goes DOWN"
+
+    if info is None:
+        return f"**{ticker}** ({bet_word})\nCan't get the price right now — I'll try again next check.", False
+
+    price = info["price"]
+    pnl_pct = compute_pnl_pct(entry_price, price, position)
+    action, sell_now = evaluate_position_action(
+        position, entry_price, pos.get("stop_loss_pct"), pos.get("take_profit_pct"), info["signal"], pnl_pct,
+    )
+    if not sell_now and compute_early_warning(position, info):
+        action += "\n⚠️ but it's starting to turn — keep an eye on it"
+
+    if entry_price:
+        won_lost = "up" if pnl_pct >= 0 else "down"
+        money_line = f"Started at ${entry_price:.2f}, now ${price:.2f} — you're **{won_lost} {abs(pnl_pct):.1f}%**"
+    else:
+        money_line = f"Now ${price:.2f}"
+
+    return f"**{ticker}** ({bet_word})\n{money_line}\n👉 {action}", sell_now
 
 
 def get_scanner_signal(state: dict, ticker: str) -> str:
@@ -361,34 +448,19 @@ def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_
     positions = last_signal.get("positions", {})
     if positions:
         lines = []
+        any_sell = False
         for ticker, pos in positions.items():
-            position, entry_price = pos["signal"], pos["entry_price"]
-            stop_loss_pct = pos.get("stop_loss_pct")
-            take_profit_pct = pos.get("take_profit_pct")
             try:
                 info = get_signal(ticker, cfg)
-            except Exception as e:
-                lines.append(f"**{ticker}** ({position}): data error — {e}")
-                continue
+            except Exception:
+                info = None
 
-            if info is None:
-                lines.append(f"**{ticker}** ({position}): not enough data right now")
-                continue
-
-            price = info["price"]
-            current_signal = info["signal"]
-            pnl_pct = compute_pnl_pct(entry_price, price, position)
-            pnl_str = f" ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)" if pnl_pct is not None else ""
-
-            action = evaluate_position_action(position, entry_price, stop_loss_pct, take_profit_pct, current_signal, pnl_pct)
-            if action == "STAY / HOLD" and compute_early_warning(position, info):
-                action += " ⚠️ (momentum turning against you — watch closely)"
-
-            entry_str = f"${entry_price:.2f}" if entry_price else "unknown"
-            lines.append(f"**{ticker}** ({position} @ {entry_str} → ${price:.2f}{pnl_str}): **{action}**")
+            line, sell_now = format_bet_line(ticker, pos, info)
+            lines.append(line)
+            any_sell = any_sell or sell_now
 
         try:
-            post_portfolio_to_discord(bot_token, trades_channel_id, lines)
+            post_portfolio_to_discord(bot_token, trades_channel_id, lines, any_sell)
             print(f"posted portfolio update for {len(positions)} position(s)")
         except Exception as e:
             print(f"portfolio post error: {e}")
