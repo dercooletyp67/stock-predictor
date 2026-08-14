@@ -39,6 +39,13 @@ COMMANDS = [
                 ],
             },
             {
+                "name": "shares",
+                "description": "How many shares you bought (so I can tell you your profit in dollars)",
+                "type": 4,  # INTEGER
+                "required": False,
+                "min_value": 1,
+            },
+            {
                 "name": "stop_if_down",
                 "description": "Optional: tell me to sell if I lose this many percent",
                 "type": 10,  # NUMBER

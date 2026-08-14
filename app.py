@@ -19,7 +19,8 @@ from predictor import (
     load_config, get_bot_token, get_channel_id, load_state, save_state, run_pass,
     get_signal, get_position, set_position, USER_ID as ALLOWED_USER_ID,
     get_effective_config, get_default_target_pct, format_bet_line, plain_bet, plain_reasons,
-    GUESS_NOTE,
+    compute_profit, compute_pnl_pct, record_closed_bet, summarize_record,
+    default_share_count, GUESS_NOTE,
 )
 
 app = Flask(__name__)
@@ -33,11 +34,11 @@ HELP_TEXT = (
     "then I watch your bet and tell you when to sell. I'll @ you when it's time to sell.\n\n"
     "**How to use me**\n"
     "`/best` — what's the best bet right now?\n"
-    "`/invest stock:NVDA bet:auto` — I'll watch this one for you. "
-    "`bet` can be `up`, `down`, or `auto` (I pick). "
-    "You can add `stop_if_down` (sell if you lose this many %) and `sell_at_profit` (sell once you gain this many %).\n"
-    "`/status` — how are my bets doing? Should I sell?\n"
-    "`/sold stock:NVDA` — I sold it in the game, stop watching it.\n"
+    "`/invest stock:NVDA bet:auto shares:20` — I'll watch this one for you. "
+    "`bet` can be `up`, `down`, or `auto` (I pick). Tell me `shares` so I can show your profit in real dollars. "
+    "You can also add `stop_if_down` (sell if you lose this many %) and `sell_at_profit` (sell once you gain this many %).\n"
+    "`/status` — how are my bets doing, and what would I make if I sold now?\n"
+    "`/sold stock:NVDA` — I sold it in the game. I'll tell you what you made and add it to your record.\n"
     "`/check stock:NVDA` — how is this one stock doing?\n"
     "`/market` — how is every stock doing?\n"
     "`/money amount:50000` — how much money I have, so you suggest the right amount to bet.\n"
@@ -107,7 +108,7 @@ def discord_followup(application_id: str, interaction_token: str, content: str):
     requests.patch(url, json={"content": content}, timeout=10)
 
 
-def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict, stop_loss_pct=None, take_profit_pct=None):
+def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict, stop_loss_pct=None, take_profit_pct=None, shares=None):
     ticker = ticker.upper()
     direction = direction.upper()
     try:
@@ -126,42 +127,83 @@ def handle_invest(application_id: str, interaction_token: str, ticker: str, dire
                 )
                 return
             direction = info["signal"]
-            note = f" I picked this because that's the way it's moving right now."
+            note = " I picked this because that's the way it's moving right now."
+
+        # If they didn't say how many shares, fall back to what I suggested — but say so,
+        # because every dollar figure from here on depends on this number being right.
+        shares_note = ""
+        if shares is None:
+            shares = info.get("suggested_shares") or default_share_count(cfg, info["price"])
+            shares_note = (
+                f"\nI'm assuming you bought **{shares} shares**. "
+                f"If that's wrong, run /invest again with `shares:` set to the real number."
+            )
 
         with STATE_LOCK:
             state = load_state()
             effective_take_profit = take_profit_pct if take_profit_pct is not None else get_default_target_pct(state)
-            set_position(state, ticker, direction, info["price"], stop_loss_pct, effective_take_profit)
+            set_position(state, ticker, direction, info["price"], stop_loss_pct, effective_take_profit, shares)
             save_state(state)
 
         bet_word = "goes UP" if direction == "LONG" else "goes DOWN"
+        cost = shares * info["price"] if shares else None
+        cost_note = f" That's about **${cost:,.0f}** of your money." if cost else ""
+
         rules = []
         if stop_loss_pct:
-            rules.append(f"tell you to sell if you lose {stop_loss_pct:.0f}%")
+            rules.append(f"if you lose {stop_loss_pct:.0f}%")
         if effective_take_profit:
-            rules.append(f"tell you to sell once you gain {effective_take_profit:.0f}%")
-        rules_note = (" I'll also " + " and ".join(rules) + ".") if rules else ""
+            rules.append(f"once you gain {effective_take_profit:.0f}%")
+        rules_note = ("\nI'll also tell you to sell " + " or ".join(rules) + ".") if rules else ""
 
         discord_followup(
             application_id, interaction_token,
-            f"Got it — you're betting **{ticker} {bet_word}**, starting at **${info['price']:.2f}**.{note}\n"
-            f"I'll check on it every few minutes and @ you when it's time to sell.{rules_note}",
+            f"Got it — you're betting **{ticker} {bet_word}**, starting at **${info['price']:.2f}**.{note}{cost_note}\n"
+            f"I'll check every few minutes and @ you when it's time to sell, and tell you what you'd make."
+            f"{rules_note}{shares_note}",
         )
     except Exception as e:
         discord_followup(application_id, interaction_token, f"Something went wrong with `{ticker}`: {e}")
 
 
-def handle_sold(application_id: str, interaction_token: str, ticker: str):
+def handle_sold(application_id: str, interaction_token: str, ticker: str, cfg: dict):
     ticker = ticker.upper()
     with STATE_LOCK:
         state = load_state()
-        signal, entry_price, _, _ = get_position(state, ticker)
-        if signal not in ("LONG", "SHORT"):
+        pos = get_position(state, ticker)
+        if not pos:
             discord_followup(application_id, interaction_token, f"I wasn't watching any bet on **{ticker}**.")
             return
+
+    try:
+        info = get_signal(ticker, cfg)
+    except Exception:
+        info = None
+
+    exit_price = info["price"] if info else None
+    profit = None
+    pnl_pct = None
+    if exit_price:
+        profit = compute_profit(pos.get("entry_price"), exit_price, pos["signal"], pos.get("shares"))
+        pnl_pct = compute_pnl_pct(pos.get("entry_price"), exit_price, pos["signal"])
+
+    with STATE_LOCK:
+        state = load_state()
+        record_closed_bet(state, ticker, pos, exit_price, profit)
         set_position(state, ticker, "NEUTRAL", None)
         save_state(state)
-    discord_followup(application_id, interaction_token, f"Done — I've stopped watching **{ticker}**. Good luck with the next one.")
+        record = summarize_record(state)
+
+    if profit is not None:
+        made_lost = "made" if profit >= 0 else "lost"
+        result = f"Nice — you {made_lost} **${abs(profit):,.2f}** on **{ticker}** ({pnl_pct:+.1f}%)."
+    elif pnl_pct is not None:
+        result = f"**{ticker}** closed {pnl_pct:+.1f}%."
+    else:
+        result = f"Stopped watching **{ticker}**."
+
+    tail = f"\n{record}" if record else ""
+    discord_followup(application_id, interaction_token, f"{result} I've stopped watching it.{tail}")
 
 
 def handle_money(application_id: str, interaction_token: str, amount: float):
@@ -198,11 +240,11 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
         state = load_state()
 
     positions = state.get("positions", {})
+    record = summarize_record(state)
+
     if not positions:
-        discord_followup(
-            application_id, interaction_token,
-            "You're not in any bets right now. Try `/best` to see what's worth betting on.",
-        )
+        msg = "You're not in any bets right now. Try `/best` to see what's worth betting on."
+        discord_followup(application_id, interaction_token, f"{msg}\n\n{record}" if record else msg)
         return
 
     lines = []
@@ -213,6 +255,9 @@ def handle_status(application_id: str, interaction_token: str, cfg: dict):
             info = None
         line, _ = format_bet_line(ticker, pos, info)
         lines.append(line)
+
+    if record:
+        lines.append(record)
 
     discord_followup(application_id, interaction_token, "\n\n".join(lines))
 
@@ -237,12 +282,17 @@ def handle_best(application_id: str, interaction_token: str, cfg: dict):
     candidates.sort(key=lambda i: i["confidence"], reverse=True)
     best = candidates[0]
     move = f"{'up' if best['signal'] == 'LONG' else 'down'} {best['projected_move_pct']:.1f}%"
+    could_make = compute_profit(best["price"], best["target_price"], best["signal"], best["suggested_shares"])
 
     lines = [
         f"**Best bet right now: {best['ticker']}** — {plain_bet(best['signal'])}",
         f"Costs **${best['price']:.2f}** each right now.",
         f"Buy about **{best['suggested_shares']} shares** (roughly ${best['suggested_amount']:,.0f} of your money).",
         f"I think it could go {move}, to about ${best['target_price']:.2f}, over the next hour or so.",
+    ]
+    if could_make:
+        lines.append(f"💰 If that happens you'd make about **${could_make:,.2f}**.")
+    lines += [
         f"How sure am I? **{best['confidence']*100:.0f}%**",
         "",
         "Why:",
@@ -360,13 +410,14 @@ def discord_interactions():
         if command_name == "invest":
             threading.Thread(
                 target=handle_invest,
-                args=(application_id, interaction_token, options["stock"], options["bet"], cfg, options.get("stop_if_down"), options.get("sell_at_profit")),
+                args=(application_id, interaction_token, options["stock"], options["bet"], cfg,
+                      options.get("stop_if_down"), options.get("sell_at_profit"), options.get("shares")),
                 daemon=True,
             ).start()
         elif command_name == "sold":
             threading.Thread(
                 target=handle_sold,
-                args=(application_id, interaction_token, options["stock"]),
+                args=(application_id, interaction_token, options["stock"], cfg),
                 daemon=True,
             ).start()
         elif command_name == "status":

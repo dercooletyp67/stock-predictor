@@ -309,22 +309,70 @@ def post_heartbeat_to_discord(bot_token: str, channel_id: str, current_signals: 
 
 
 def get_position(state: dict, ticker: str):
-    """Positions ONLY exist here if the user explicitly declared them via /invest."""
-    pos = state.get("positions", {}).get(ticker)
-    if pos:
-        return pos.get("signal", "NEUTRAL"), pos.get("entry_price"), pos.get("stop_loss_pct"), pos.get("take_profit_pct")
-    return "NEUTRAL", None, None, None
+    """The bet you told me about with /invest, or None. Bets ONLY exist here if you declared them."""
+    return state.get("positions", {}).get(ticker)
 
 
-def set_position(state: dict, ticker: str, signal: str, entry_price, stop_loss_pct=None, take_profit_pct=None):
+def set_position(state: dict, ticker: str, signal: str, entry_price, stop_loss_pct=None, take_profit_pct=None, shares=None):
     positions = state.setdefault("positions", {})
     if signal in ("LONG", "SHORT"):
         positions[ticker] = {
-            "signal": signal, "entry_price": entry_price,
+            "signal": signal, "entry_price": entry_price, "shares": shares,
             "stop_loss_pct": stop_loss_pct, "take_profit_pct": take_profit_pct,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
         }
     else:
         positions.pop(ticker, None)
+
+
+def default_share_count(cfg: dict, price: float) -> int:
+    """
+    A sensible share count when the user didn't give one and there's no live suggestion
+    (e.g. they bet on a stock that isn't signalling). Uses the smallest risk step.
+    """
+    if not price or price <= 0:
+        return 1
+    return max(1, round(cfg["bankroll"] * cfg["min_risk_pct"] / price))
+
+
+def compute_profit(entry_price, current_price, position: str, shares):
+    """Actual money made or lost, in dollars. None if we don't know how many shares."""
+    if not entry_price or not shares:
+        return None
+    direction = 1 if position == "LONG" else -1
+    return direction * (current_price - entry_price) * shares
+
+
+def record_closed_bet(state: dict, ticker: str, pos: dict, exit_price, profit):
+    """Keep a running record so you can see how you're doing overall."""
+    history = state.setdefault("history", [])
+    history.append({
+        "ticker": ticker,
+        "signal": pos["signal"],
+        "entry_price": pos.get("entry_price"),
+        "exit_price": exit_price,
+        "shares": pos.get("shares"),
+        "profit": profit,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    del history[:-100]  # keep the last 100 bets, no need for more
+    if profit is not None:
+        state["total_profit"] = state.get("total_profit", 0) + profit
+
+
+def summarize_record(state: dict):
+    """One plain line about how you've done overall, or None if you haven't finished any bets yet."""
+    history = state.get("history", [])
+    scored = [h for h in history if h.get("profit") is not None]
+    if not scored:
+        return None
+    wins = sum(1 for h in scored if h["profit"] > 0)
+    total = state.get("total_profit", 0)
+    updown = "up" if total >= 0 else "down"
+    return (
+        f"Overall: **{updown} ${abs(total):,.0f}** across {len(scored)} finished bet"
+        f"{'s' if len(scored) != 1 else ''} ({wins} good, {len(scored) - wins} bad)."
+    )
 
 
 def get_bankroll(cfg: dict, state: dict) -> float:
@@ -377,11 +425,12 @@ def compute_early_warning(position: str, info: dict) -> bool:
 
 def format_bet_line(ticker: str, pos: dict, info):
     """
-    One plain-English block describing a bet and what to do about it.
+    One plain-English block describing a bet, what it's worth, and what to do about it.
     Returns (text, sell_now). Used by both the automatic message and /status so they always agree.
     """
     position = pos["signal"]
     entry_price = pos.get("entry_price")
+    shares = pos.get("shares")
     bet_word = "betting it goes UP" if position == "LONG" else "betting it goes DOWN"
 
     if info is None:
@@ -389,19 +438,29 @@ def format_bet_line(ticker: str, pos: dict, info):
 
     price = info["price"]
     pnl_pct = compute_pnl_pct(entry_price, price, position)
+    profit = compute_profit(entry_price, price, position, shares)
     action, sell_now = evaluate_position_action(
         position, entry_price, pos.get("stop_loss_pct"), pos.get("take_profit_pct"), info["signal"], pnl_pct,
     )
     if not sell_now and compute_early_warning(position, info):
         action += "\n⚠️ but it's starting to turn — keep an eye on it"
 
+    rows = [f"**{ticker}** ({bet_word})"]
     if entry_price:
-        won_lost = "up" if pnl_pct >= 0 else "down"
-        money_line = f"Started at ${entry_price:.2f}, now ${price:.2f} — you're **{won_lost} {abs(pnl_pct):.1f}%**"
+        share_note = f"{shares} shares, " if shares else ""
+        rows.append(f"{share_note}bought at ${entry_price:.2f}, now ${price:.2f}")
     else:
-        money_line = f"Now ${price:.2f}"
+        rows.append(f"Now ${price:.2f}")
 
-    return f"**{ticker}** ({bet_word})\n{money_line}\n👉 {action}", sell_now
+    if profit is not None:
+        made_lost = "make" if profit >= 0 else "lose"
+        rows.append(f"💰 Sell now and you **{made_lost} ${abs(profit):,.2f}** ({pnl_pct:+.1f}%)")
+    elif pnl_pct is not None:
+        rows.append(f"You're **{'up' if pnl_pct >= 0 else 'down'} {abs(pnl_pct):.1f}%** "
+                    f"(tell me your share count with /invest to see this in dollars)")
+
+    rows.append(f"👉 {action}")
+    return "\n".join(rows), sell_now
 
 
 def get_scanner_signal(state: dict, ticker: str) -> str:
@@ -458,6 +517,10 @@ def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_
             line, sell_now = format_bet_line(ticker, pos, info)
             lines.append(line)
             any_sell = any_sell or sell_now
+
+        record = summarize_record(last_signal)
+        if record:
+            lines.append(record)
 
         try:
             post_portfolio_to_discord(bot_token, trades_channel_id, lines, any_sell)
