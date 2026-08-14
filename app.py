@@ -20,7 +20,7 @@ from predictor import (
     get_signal, get_position, set_position, USER_ID as ALLOWED_USER_ID,
     get_effective_config, get_default_target_pct, format_bet_line, plain_bet, plain_reasons,
     compute_profit, compute_pnl_pct, record_closed_bet, summarize_record,
-    default_share_count, GUESS_NOTE,
+    default_share_count, button_rows, GUESS_NOTE,
 )
 
 app = Flask(__name__)
@@ -103,9 +103,12 @@ def verify_discord_signature(req) -> bool:
         return False
 
 
-def discord_followup(application_id: str, interaction_token: str, content: str):
+def discord_followup(application_id: str, interaction_token: str, content: str, buttons: list = None):
     url = f"{DISCORD_API}/webhooks/{application_id}/{interaction_token}/messages/@original"
-    requests.patch(url, json={"content": content}, timeout=10)
+    payload = {"content": content}
+    if buttons:
+        payload["components"] = button_rows(buttons)
+    requests.patch(url, json=payload, timeout=10)
 
 
 def handle_invest(application_id: str, interaction_token: str, ticker: str, direction: str, cfg: dict, stop_loss_pct=None, take_profit_pct=None, shares=None):
@@ -306,9 +309,18 @@ def handle_best(application_id: str, interaction_token: str, cfg: dict):
         for c in runner_ups:
             lines.append(f"• **{c['ticker']}** — {plain_bet(c['signal'])} · {c['confidence']*100:.0f}% sure")
 
+    buttons = [
+        {
+            "type": 2,
+            "style": 3 if c["signal"] == "LONG" else 4,
+            "label": f"Watch {c['ticker']}",
+            "custom_id": f"track:{c['ticker']}:{c['signal']}",
+        }
+        for c in candidates[:5]
+    ]
     lines.append("")
-    lines.append(f"To have me watch it: `/invest stock:{best['ticker']} bet:auto`")
-    discord_followup(application_id, interaction_token, "\n".join(lines))
+    lines.append("Placed the bet in the game? Tap the button and I'll watch it for you.")
+    discord_followup(application_id, interaction_token, "\n".join(lines), buttons)
 
 
 def handle_check(application_id: str, interaction_token: str, ticker: str, cfg: dict):
@@ -386,7 +398,9 @@ def discord_interactions():
     if body["type"] == 1:  # PING
         return jsonify({"type": 1})
 
-    if body["type"] == 2:  # APPLICATION_COMMAND
+    # Buttons sit on messages in public channels, so anyone could click one.
+    # Same owner-only check as slash commands.
+    if body["type"] in (2, 3):
         invoking_user = (body.get("member") or {}).get("user") or body.get("user") or {}
         if invoking_user.get("id") != ALLOWED_USER_ID:
             return jsonify({
@@ -394,6 +408,33 @@ def discord_interactions():
                 "data": {"content": "You're not authorized to use this bot.", "flags": 64},  # 64 = ephemeral
             })
 
+    if body["type"] == 3:  # MESSAGE_COMPONENT (a button was tapped)
+        with STATE_LOCK:
+            cfg = get_effective_config(load_config(), load_state())
+        application_id = body["application_id"]
+        interaction_token = body["token"]
+        custom_id = body["data"]["custom_id"]
+
+        action, _, rest = custom_id.partition(":")
+        if action == "track":
+            ticker, _, direction = rest.partition(":")
+            threading.Thread(
+                target=handle_invest,
+                args=(application_id, interaction_token, ticker, direction, cfg),
+                daemon=True,
+            ).start()
+        elif action == "sold":
+            threading.Thread(
+                target=handle_sold,
+                args=(application_id, interaction_token, rest, cfg),
+                daemon=True,
+            ).start()
+        else:
+            return jsonify({"type": 4, "data": {"content": "I don't know that button.", "flags": 64}})
+
+        return jsonify({"type": 5, "data": {"flags": 64}})  # DEFERRED, ephemeral
+
+    if body["type"] == 2:  # APPLICATION_COMMAND
         with STATE_LOCK:
             cfg = get_effective_config(load_config(), load_state())
         application_id = body["application_id"]

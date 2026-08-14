@@ -41,10 +41,20 @@ def get_channel_id(cfg: dict, name: str) -> str:
     return os.environ.get(env_key) or cfg.get(cfg_key, "")
 
 
-def post_channel_message(bot_token: str, channel_id: str, embed: dict, ping: bool = False):
+def button_rows(buttons: list) -> list:
+    """Discord allows 5 buttons per row and 5 rows; anything past 25 is dropped."""
+    rows = []
+    for i in range(0, min(len(buttons), 25), 5):
+        rows.append({"type": 1, "components": buttons[i:i + 5]})
+    return rows
+
+
+def post_channel_message(bot_token: str, channel_id: str, embed: dict, ping: bool = False, buttons: list = None):
     payload = {"embeds": [embed]}
     if ping:
         payload["content"] = f"<@{USER_ID}>"
+    if buttons:
+        payload["components"] = button_rows(buttons)
     resp = requests.post(
         f"{DISCORD_API}/channels/{channel_id}/messages",
         headers={"Authorization": f"Bot {bot_token}"},
@@ -254,26 +264,39 @@ def post_digest_to_discord(bot_token: str, channel_id: str, new_signals: list):
         )
 
     count = len(new_signals)
+    buttons = [
+        {
+            "type": 2,
+            "style": 3 if info["signal"] == "LONG" else 4,  # green for up, red for down
+            "label": f"Watch {info['ticker']}",
+            "custom_id": f"track:{info['ticker']}:{info['signal']}",
+        }
+        for info in new_signals
+    ]
     embed = {
         "title": f"{count} new chance{'s' if count != 1 else ''} to bet",
         "color": 3447003,
         "description": "\n\n".join(lines),
-        "footer": {"text": f"Type /invest to have me watch one of these for you. {GUESS_NOTE}"},
+        "footer": {"text": f"Tap a button once you've placed the bet in the game. {GUESS_NOTE}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    post_channel_message(bot_token, channel_id, embed)
+    post_channel_message(bot_token, channel_id, embed, buttons=buttons)
 
 
-def post_portfolio_to_discord(bot_token: str, channel_id: str, lines: list, needs_sell: bool):
+def post_portfolio_to_discord(bot_token: str, channel_id: str, lines: list, needs_sell: bool, tickers: list = None):
     """One message covering every bet you told me about with /invest."""
+    buttons = [
+        {"type": 2, "style": 2, "label": f"Sold {t}", "custom_id": f"sold:{t}"}
+        for t in (tickers or [])
+    ]
     embed = {
         "title": "Your bets — SELL SOMETHING NOW" if needs_sell else "Your bets — nothing to do",
         "color": 15158332 if needs_sell else 10181046,  # red if you need to act, else purple
         "description": "\n\n".join(lines),
-        "footer": {"text": f"Type /sold once you've sold in the game. {GUESS_NOTE}"},
+        "footer": {"text": f"Tap a button once you've sold it in the game. {GUESS_NOTE}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    post_channel_message(bot_token, channel_id, embed, ping=needs_sell)
+    post_channel_message(bot_token, channel_id, embed, ping=needs_sell, buttons=buttons)
 
 
 def post_heartbeat_to_discord(bot_token: str, channel_id: str, current_signals: dict, errors: dict):
@@ -523,7 +546,7 @@ def run_pass(cfg: dict, bot_token: str, signals_channel_id: str, trades_channel_
             lines.append(record)
 
         try:
-            post_portfolio_to_discord(bot_token, trades_channel_id, lines, any_sell)
+            post_portfolio_to_discord(bot_token, trades_channel_id, lines, any_sell, list(positions.keys()))
             print(f"posted portfolio update for {len(positions)} position(s)")
         except Exception as e:
             print(f"portfolio post error: {e}")
